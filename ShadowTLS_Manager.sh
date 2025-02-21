@@ -262,7 +262,7 @@ read_config() {
 # ===========================
 # 主操作函数
 install_shadowtls() {
-    install_tools  # 在安装时检查并安装依赖
+    install_tools
     while true; do
         read -rp "请输入后端服务端口 (适用于 SS2022、Trojan、Snell 等，端口范围为1-65535): " BACKEND_PORT
         if [[ -z "$BACKEND_PORT" ]]; then
@@ -320,6 +320,33 @@ check_service_status() {
     fi
 }
 
+start_service() {
+    if command -v shadow-tls >/dev/null && systemctl is-active --quiet shadow-tls; then
+        print_info "Shadow-TLS 已在运行"
+    else
+        systemctl start shadow-tls
+        sleep 2
+        check_service_status
+    fi
+}
+
+stop_service() {
+    if systemctl is-active --quiet shadow-tls; then
+        systemctl stop shadow-tls
+        sleep 2
+        print_info "Shadow-TLS 已停止"
+    else
+        print_error "Shadow-TLS 未运行"
+    fi
+}
+
+restart_service() {
+    systemctl daemon-reload
+    systemctl restart shadow-tls
+    sleep 2
+    check_service_status
+}
+
 upgrade_shadowtls() {
     local current_version latest_version
     if command -v shadow-tls >/dev/null; then
@@ -344,7 +371,7 @@ upgrade_shadowtls() {
             return
         fi
         
-        install_tools  # 在升级时检查依赖
+        install_tools
         print_info "正在升级 Shadow-TLS，从 $current_version 升级到 $latest_version..."
         systemctl stop shadow-tls
         download_shadowtls "true"
@@ -441,12 +468,6 @@ set_password() {
     return 0
 }
 
-restart_service() {
-    systemctl daemon-reload
-    systemctl restart shadow-tls
-    check_service_status
-}
-
 update_service_file() {
     SERVICE_FILE="/etc/systemd/system/shadow-tls.service"
     if [[ -f "$SERVICE_FILE" ]]; then
@@ -517,19 +538,46 @@ main_menu() {
     while true; do
         clear
         echo -e "\n${Cyan_font_prefix}Shadow-TLS 管理菜单${RESET}"
+        echo -e "=================================="
+        echo -e " 安装与更新"
+        echo -e "=================================="
         echo -e "${Yellow_font_prefix}1. 安装 Shadow-TLS${RESET}"
         echo -e "${Yellow_font_prefix}2. 升级 Shadow-TLS${RESET}"
         echo -e "${Yellow_font_prefix}3. 卸载 Shadow-TLS${RESET}"
+        echo -e "=================================="
+        echo -e " 配置管理"
+        echo -e "=================================="
         echo -e "${Yellow_font_prefix}4. 查看 Shadow-TLS 配置信息${RESET}"
         echo -e "${Yellow_font_prefix}5. 修改 Shadow-TLS 配置${RESET}"
+        echo -e "=================================="
+        echo -e " 服务控制"
+        echo -e "=================================="
+        echo -e "${Yellow_font_prefix}6. 启动 Shadow-TLS${RESET}"
+        echo -e "${Yellow_font_prefix}7. 停止 Shadow-TLS${RESET}"
+        echo -e "${Yellow_font_prefix}8. 重启 Shadow-TLS${RESET}"
+        echo -e "=================================="
+        echo -e " 退出"
+        echo -e "=================================="
         echo -e "${Yellow_font_prefix}0. 退出${RESET}"
-        read -rp "请选择操作 [0-5]: " choice
+        if [[ -e /usr/local/bin/shadow-tls ]]; then
+            if systemctl is-active --quiet shadow-tls; then
+                echo -e " 当前状态：${Green_font_prefix}已安装并已启动${RESET}"
+            else
+                echo -e " 当前状态：${Green_font_prefix}已安装${RESET} 但 ${Red_font_prefix}未启动${RESET}"
+            fi
+        else
+            echo -e " 当前状态：${Red_font_prefix}未安装${RESET}"
+        fi
+        read -rp "请选择操作 [0-8]: " choice
         case "$choice" in
             1) install_shadowtls ;;
             2) upgrade_shadowtls ;;
             3) uninstall_shadowtls ;;
             4) view_config ;;
             5) set_config ;;
+            6) start_service ;;
+            7) stop_service ;;
+            8) restart_service ;;
             0) exit 0 ;;
             *) print_error "无效的选择" ;;
         esac
