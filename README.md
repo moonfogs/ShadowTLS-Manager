@@ -54,6 +54,20 @@ wget -O ShadowTLS_Manager.sh --no-check-certificate https://raw.githubuserconten
 ### 5、输入ShadowTLS外部监听端口，即最终使用的端口，默认为443
 ### 6、按需开启泛域名SNI和fastopen
 ### 7、安装完毕后回到主菜单按数字键4查看配置信息
+# **注意不要混淆多个端口**
+## **后端服务端口**（2525）是ss2022的端口，使用客户端如Loon、Surge等配置时要填写**外部监听端口**（443）,如需配置udp端口则填入后端服务端口（2525）。注：443和2525为脚本默认端口
+### Loon 配置参考示例（192.168.1.1为服务器ip）
+```
+SS2022+sTLS = Shadowsocks,192.168.1.1,443,2022-blake3-aes-128-gcm,"ss2022密码",shadow-tls-password=shadowtls密码,shadow-tls-sni=www.tesla.com,shadow-tls-version=3,udp-port=2525,ip-mode=v4-only,fast-open=false,udp=true
+```
+### Surge 配置参考示例（192.168.1.1为服务器ip）
+```
+SS2022+sTLS = ss, 192.168.1.1, 443, encrypt-method=2022-blake3-aes-128-gcm, password="ss2022密码", ip-version=v4-only, shadow-tls-password="shadowtls密码", shadow-tls-sni=www.tesla.com, shadow-tls-version=3, udp-relay=true, udp-port=2525
+```
+### Mihomo 配置参考示例（192.168.1.1为服务器ip）
+```
+- {"name":"SS2022+sTLS","type":"ss","server":"192.168.1.1","port":443,"cipher":"2022-blake3-aes-128-gcm","password":"ss2022密码","udp":true,"udp-over-tcp":true,"udp-over-tcp-version":"2","ip-version":"ipv4","plugin":"shadow-tls","client-fingerprint":"chrome","plugin-opts":{"host":"www.tesla.com","password":"shadowtls密码","version":3}}
+```
 
 # 参考资料
 
