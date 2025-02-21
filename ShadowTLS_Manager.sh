@@ -17,6 +17,8 @@ BACKEND_PORT=""
 EXT_PORT=""          # 外部监听端口
 TLS_DOMAIN=""        # 伪装域名
 TLS_PASSWORD=""      # 密码
+WILDCARD_SNI="false" # 是否启用泛域名 SNI
+FASTOPEN="false"     # 是否启用 fastopen
 
 # ===========================
 # 通用交互提示函数
@@ -132,7 +134,6 @@ prompt_valid_domain() {
 
 # 检查端口是否被占用
 check_port_in_use() {
-    # 使用 -ltnH 参数列出所有监听状态的 tcp 套接字（不显示标题），过滤条件为 sport = :$1
     if [ -n "$(ss -ltnH "sport = :$1")" ]; then
         return 0  # 端口已被占用
     else
@@ -148,7 +149,6 @@ get_latest_version() {
     fi || { print_error "获取最新版本失败，使用默认版本 v0.2.25"; echo "v0.2.25"; }
 }
 
-# 修改 download_shadowtls 函数，增加 force 参数用于升级时强制下载
 download_shadowtls() {
     local force_download="${1:-false}"
     if [[ "$force_download" != "true" ]]; then
@@ -166,7 +166,6 @@ download_shadowtls() {
     chmod a+x /usr/local/bin/shadow-tls
 }
 
-# 创建服务单元配置文件时询问是否开启泛域名SNI和fastopen选项
 create_service() {
     SERVICE_FILE="/etc/systemd/system/shadow-tls.service"
     local wildcard_sni_option=""
@@ -178,8 +177,10 @@ create_service() {
     echo -e "${RESET}"
     if [[ "${reply,,}" == "y" ]]; then
         wildcard_sni_option="--wildcard-sni=authed "
+        WILDCARD_SNI="true"
     else
         wildcard_sni_option=""
+        WILDCARD_SNI="false"
     fi
 
     echo -e "${Yellow_font_prefix}是否开启 fastopen？(y/n, 默认不开启):${Green_font_prefix}"
@@ -187,8 +188,10 @@ create_service() {
     echo -e "${RESET}"
     if [[ "${reply,,}" == "y" ]]; then
         fastopen_option="--fastopen "
+        FASTOPEN="true"
     else
         fastopen_option=""
+        FASTOPEN="false"
     fi
 
     cat > "$SERVICE_FILE" <<EOF
@@ -212,7 +215,6 @@ EOF
     print_info "系统服务已配置完成"
 }
 
-# 从本机网络配置中读取第一个IP地址
 get_server_ip() {
     local ip
     ip=$(hostname -I | awk '{print $1}')
@@ -227,6 +229,8 @@ write_config() {
         echo "external_listen_port=${EXT_PORT}"
         echo "disguise_domain=${TLS_DOMAIN}"
         echo "backend_port=${BACKEND_PORT}"
+        echo "wildcard_sni=${WILDCARD_SNI}"
+        echo "fastopen=${FASTOPEN}"
     } > "$CONFIG_FILE"
     print_info "配置文件已更新"
 }
@@ -234,6 +238,12 @@ write_config() {
 read_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
+        TLS_PASSWORD="$password"
+        EXT_PORT="$external_listen_port"
+        TLS_DOMAIN="$disguise_domain"
+        BACKEND_PORT="$backend_port"
+        WILDCARD_SNI="${wildcard_sni:-false}"
+        FASTOPEN="${fastopen:-false}"
     else
         print_error "未找到配置文件"
         return 1
@@ -243,7 +253,6 @@ read_config() {
 # ===========================
 # 主操作函数
 install_shadowtls() {
-    # 后端服务端口必须由用户输入，无默认值
     while true; do
         read -rp "请输入后端服务端口 (适用于 SS2022、Trojan、Snell 等，端口范围为1-65535): " BACKEND_PORT
         if [[ -z "$BACKEND_PORT" ]]; then
@@ -255,10 +264,8 @@ install_shadowtls() {
         fi
     done
 
-    # 确保域名已经有效（已通过prompt_valid_domain验证）
     TLS_DOMAIN=$(prompt_valid_domain)
 
-    # 密码输入不显示默认提示
     read -rp "请输入 Shadow-TLS 的密码 (留空则自动生成): " input_password
     if [[ -z "$input_password" ]]; then
         TLS_PASSWORD=$(openssl rand -base64 16)
@@ -278,7 +285,7 @@ install_shadowtls() {
         fi
     done
 
-    create_service  # 这里调用create_service函数，确保在输入端口之后
+    create_service
 
     print_info "外部监听端口设置完毕，正在下载 Shadow-TLS 并生成系统服务配置，请稍候..."
 
@@ -308,7 +315,6 @@ check_service_status() {
 upgrade_shadowtls() {
     local current_version latest_version
     if command -v shadow-tls >/dev/null; then
-        # 获取当前版本
         current_version=$(shadow-tls --version 2>/dev/null | grep -oP 'shadow-tls \K[0-9.]+')
         if [[ -z "$current_version" ]]; then
             current_version="unknown"
@@ -320,7 +326,6 @@ upgrade_shadowtls() {
     fi
     latest_version=$(get_latest_version)
 
-    # 比较版本号
     if [[ "$current_version" == "$latest_version" ]]; then
         print_info "当前已是最新版本 ($current_version)，无需升级。"
     else
@@ -363,6 +368,8 @@ view_config() {
         echo -e "伪装域名：${disguise_domain}"
         echo -e "密码：${password}"
         echo -e "后端服务端口：${backend_port}"
+        echo -e "泛域名 SNI：${wildcard_sni}"
+        echo -e "Fastopen：${fastopen}"
     else
         print_error "未找到 Shadow-TLS 配置信息，请确认已安装 Shadow-TLS"
     fi
@@ -373,14 +380,14 @@ set_disguise_domain() {
     new_domain=$(prompt_valid_domain)
     if [[ -n "$new_domain" ]]; then
         TLS_DOMAIN="$new_domain"
+        return 0
     else
         return 1
     fi
 }
 
 set_external_port() {
-    read_config  # 尝试读取配置文件，如果失败则不影响函数继续执行
-    local current_port="${external_listen_port:-未设置}"
+    local current_port="${EXT_PORT:-未设置}"
     local new_port
     read -rp "请输入新的外部监听端口 (当前: $current_port): " new_port
     if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; then
@@ -391,14 +398,14 @@ set_external_port() {
         print_error "端口 ${new_port} 已被占用，请更换端口"
         return 1
     fi
-    EXT_PORT="$new_port"  # 更新 EXT_PORT 变量
-    write_config  # 保存新配置到文件中
+    EXT_PORT="$new_port"
+    write_config
     print_info "外部监听端口已更新为: $EXT_PORT"
+    return 0
 }
 
 set_backend_port() {
-    read_config  # 尝试读取配置文件，如果失败则不影响函数继续执行
-    local current_port="${backend_port:-未设置}"
+    local current_port="${BACKEND_PORT:-未设置}"
     local new_port
     while true; do
         read -rp "请输入新的后端服务端口 (当前: $current_port): " new_port
@@ -406,8 +413,8 @@ set_backend_port() {
             print_error "端口号必须在1到65535之间，且为数字"
         else
             BACKEND_PORT="$new_port"
-            write_config  # 保存新配置到文件中
-            update_service_file  # 更新服务文件
+            write_config
+            update_service_file
             print_info "后端服务端口已更新为: $BACKEND_PORT"
             return 0
         fi
@@ -422,6 +429,7 @@ set_password() {
         echo -e "${Cyan_font_prefix}自动生成的 Shadow-TLS 密码为: ${new_password}${RESET}"
     fi
     TLS_PASSWORD="$new_password"
+    return 0
 }
 
 restart_service() {
@@ -433,13 +441,28 @@ restart_service() {
 update_service_file() {
     SERVICE_FILE="/etc/systemd/system/shadow-tls.service"
     if [[ -f "$SERVICE_FILE" ]]; then
-        local service_content
-        service_content=$(cat "$SERVICE_FILE")
-        service_content=$(echo "$service_content" | sed "s|--listen \[::\]:[0-9]\+|--listen [::]:${EXT_PORT}|")
-        service_content=$(echo "$service_content" | sed "s|--server 127.0.0.1:[0-9]\+|--server 127.0.0.1:${BACKEND_PORT}|")
-        service_content=$(echo "$service_content" | sed "s|--tls [^ ]\+|--tls ${TLS_DOMAIN}:443|")
-        service_content=$(echo "$service_content" | sed "s|--password [^ ]\+|--password ${TLS_PASSWORD}|")
-        echo "$service_content" > "$SERVICE_FILE"
+        local wildcard_sni_option=""
+        local fastopen_option=""
+        [[ "$WILDCARD_SNI" == "true" ]] && wildcard_sni_option="--wildcard-sni=authed "
+        [[ "$FASTOPEN" == "true" ]] && fastopen_option="--fastopen "
+        cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=Shadow-TLS Server Service
+After=network-online.target
+Wants=network-online.target systemd-networkd-wait-online.service
+
+[Service]
+LimitNOFILE=32767
+Type=simple
+User=root
+Restart=on-failure
+RestartSec=5s
+ExecStartPre=/bin/sh -c "ulimit -n 51200"
+ExecStart=/usr/local/bin/shadow-tls $fastopen_option--v3 --strict server $wildcard_sni_option--listen [::]:${EXT_PORT} --server 127.0.0.1:${BACKEND_PORT} --tls ${TLS_DOMAIN}:443 --password ${TLS_PASSWORD}
+
+[Install]
+WantedBy=multi-user.target
+EOF
         print_info "服务单元配置文件已更新。"
     else
         print_error "服务单元配置文件不存在，无法更新。"
@@ -447,8 +470,10 @@ update_service_file() {
 }
 
 set_config() {
-    if read_config; then
-        echo -e "你要修改什么？
+    # 先读取现有配置作为基础
+    read_config || print_warning "未找到现有配置，将使用默认值"
+
+    echo -e "你要修改什么？
 ==================================
  ${Green_font_prefix}1.${RESET}  修改 全部配置
  ${Green_font_prefix}2.${RESET}  修改 伪装域名
@@ -456,37 +481,34 @@ set_config() {
  ${Green_font_prefix}4.${RESET}  修改 后端服务端口
  ${Green_font_prefix}5.${RESET}  修改 外部监听端口
 =================================="
-        read -rp "(默认：取消): " modify
-        [[ -z "${modify}" ]] && { echo "已取消..."; return; }
-        case $modify in
-            1) 
-                set_disguise_domain && set_external_port && set_password && set_backend_port && write_config && update_service_file && systemctl daemon-reload && restart_service || print_error "修改配置失败"
-                ;;
-            2) 
-                set_disguise_domain && write_config && update_service_file && systemctl daemon-reload && restart_service || print_error "修改伪装域名失败"
-                ;;
-            3) 
-                set_password && write_config && update_service_file && systemctl daemon-reload && restart_service || print_error "修改密码失败"
-                ;;
-            4) 
-                set_backend_port && write_config && update_service_file && systemctl daemon-reload && restart_service || print_error "修改后端服务端口失败"
-                ;;
-            5) 
-                set_external_port && write_config && update_service_file && systemctl daemon-reload && restart_service || print_error "修改外部监听端口失败"
-                ;;
-            *) 
-                print_error "请输入正确的数字(1-5)"
-                return
-                ;;
-        esac
-    else
-        print_error "读取配置失败，无法修改配置"
-    fi
+    read -rp "(默认：取消): " modify
+    [[ -z "${modify}" ]] && { echo "已取消..."; return; }
+    case $modify in
+        1) 
+            set_disguise_domain && set_external_port && set_password && set_backend_port && write_config && update_service_file && systemctl daemon-reload && restart_service || print_error "修改配置失败"
+            ;;
+        2) 
+            set_disguise_domain && write_config && update_service_file && systemctl daemon-reload && restart_service || print_error "修改伪装域名失败"
+            ;;
+        3) 
+            set_password && write_config && update_service_file && systemctl daemon-reload && restart_service || print_error "修改密码失败"
+            ;;
+        4) 
+            set_backend_port && write_config && update_service_file && systemctl daemon-reload && restart_service || print_error "修改后端服务端口失败"
+            ;;
+        5) 
+            set_external_port && write_config && update_service_file && systemctl daemon-reload && restart_service || print_error "修改外部监听端口失败"
+            ;;
+        *) 
+            print_error "请输入正确的数字(1-5)"
+            return
+            ;;
+    esac
 }
 
 main_menu() {
     while true; do
-        clear  # 清屏使界面整洁
+        clear
         echo -e "\n${Cyan_font_prefix}Shadow-TLS 管理菜单${RESET}"
         echo -e "${Yellow_font_prefix}1. 安装 Shadow-TLS${RESET}"
         echo -e "${Yellow_font_prefix}2. 升级 Shadow-TLS${RESET}"
