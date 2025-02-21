@@ -12,13 +12,13 @@ ERROR="${Red_font_prefix}[错误]${RESET}"
 # 配置文件路径
 CONFIG_FILE="/etc/shadowtls/config"
 
-# 全局变量：后端服务端口（适用于SS2022、Trojan、Snell等）
+# 全局变量
 BACKEND_PORT=""
-EXT_PORT=""          # 外部监听端口
-TLS_DOMAIN=""        # 伪装域名
-TLS_PASSWORD=""      # 密码
-WILDCARD_SNI="false" # 是否启用泛域名 SNI
-FASTOPEN="false"     # 是否启用 fastopen
+EXT_PORT=""
+TLS_DOMAIN=""
+TLS_PASSWORD=""
+WILDCARD_SNI="false"
+FASTOPEN="false"
 
 # ===========================
 # 通用交互提示函数
@@ -30,7 +30,6 @@ prompt_with_default() {
     echo "${input:-$default_value}"
 }
 
-# 打印信息函数
 print_info() {
     echo -e "${Green_font_prefix}[信息]${RESET} $1"
 }
@@ -66,25 +65,39 @@ check_system_type() {
     fi
 }
 
+# 检查并安装依赖工具
 install_tools() {
+    local missing_tools=()
+    for tool in wget curl openssl jq; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            missing_tools+=("$tool")
+        fi
+    done
+
+    if [[ ${#missing_tools[@]} -eq 0 ]]; then
+        print_info "所有依赖工具已安装"
+        return 0
+    fi
+
+    print_info "检测到缺少工具: ${missing_tools[*]}，开始安装..."
     check_system_type
-    print_info "检测到发行版: ${release}"
     case "$release" in
         debian)
-            apt update && apt install -y wget curl openssl jq || { print_error "安装依赖失败"; exit 1; }
+            apt update && apt install -y "${missing_tools[@]}" || { print_error "安装依赖失败"; exit 1; }
             ;;
         centos)
             if command -v dnf >/dev/null 2>&1; then
-                dnf install -y wget curl openssl jq || { print_error "安装依赖失败"; exit 1; }
+                dnf install -y "${missing_tools[@]}" || { print_error "安装依赖失败"; exit 1; }
             else
-                yum install -y wget curl openssl jq || { print_error "安装依赖失败"; exit 1; }
+                yum install -y "${missing_tools[@]}" || { print_error "安装依赖失败"; exit 1; }
             fi
             ;;
         *)
             print_warning "未知发行版，尝试使用 apt 安装..."
-            apt update && apt install -y wget curl openssl jq || { print_error "安装依赖失败"; exit 1; }
+            apt update && apt install -y "${missing_tools[@]}" || { print_error "安装依赖失败"; exit 1; }
             ;;
     esac
+    print_info "依赖工具安装完成"
 }
 
 # ===========================
@@ -99,7 +112,6 @@ get_system_architecture() {
     esac
 }
 
-# 域名校验：仅验证域名是否有效（利用 getent hosts 检查解析情况）
 check_domain_validity() {
     local domain="$1"
     if nslookup "$domain" >/dev/null 2>&1; then
@@ -109,13 +121,11 @@ check_domain_validity() {
     fi
 }
 
-# 循环提示用户输入有效的伪装域名
 prompt_valid_domain() {
     local domain
     while true; do
         domain=$(prompt_with_default "请输入用于伪装的 TLS 域名（请确保该域名支持 TLS 1.3）" "www.tesla.com")
         if [[ "$domain" == "www.tesla.com" ]]; then
-            # 默认域名跳过验证
             echo -e "${Green_font_prefix}默认域名 www.tesla.com 验证通过。${RESET}" >&2
             echo "$domain"
             return 0
@@ -132,7 +142,6 @@ prompt_valid_domain() {
     done
 }
 
-# 检查端口是否被占用
 check_port_in_use() {
     if [ -n "$(ss -ltnH "sport = :$1")" ]; then
         return 0  # 端口已被占用
@@ -253,6 +262,7 @@ read_config() {
 # ===========================
 # 主操作函数
 install_shadowtls() {
+    install_tools  # 在安装时检查并安装依赖
     while true; do
         read -rp "请输入后端服务端口 (适用于 SS2022、Trojan、Snell 等，端口范围为1-65535): " BACKEND_PORT
         if [[ -z "$BACKEND_PORT" ]]; then
@@ -286,9 +296,7 @@ install_shadowtls() {
     done
 
     create_service
-
     print_info "外部监听端口设置完毕，正在下载 Shadow-TLS 并生成系统服务配置，请稍候..."
-
     download_shadowtls "false"
     systemctl daemon-reload
     systemctl enable --now shadow-tls
@@ -336,6 +344,7 @@ upgrade_shadowtls() {
             return
         fi
         
+        install_tools  # 在升级时检查依赖
         print_info "正在升级 Shadow-TLS，从 $current_version 升级到 $latest_version..."
         systemctl stop shadow-tls
         download_shadowtls "true"
@@ -470,9 +479,7 @@ EOF
 }
 
 set_config() {
-    # 先读取现有配置作为基础
     read_config || print_warning "未找到现有配置，将使用默认值"
-
     echo -e "你要修改什么？
 ==================================
  ${Green_font_prefix}1.${RESET}  修改 全部配置
@@ -533,5 +540,5 @@ main_menu() {
 
 # 脚本启动
 check_root
-install_tools
+check_system_type
 main_menu
