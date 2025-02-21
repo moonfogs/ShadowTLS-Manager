@@ -75,6 +75,12 @@ wget -O ShadowTLS_Manager.sh --no-check-certificate https://raw.githubuserconten
 ### 5、输入ShadowTLS外部监听端口，即最终使用的端口，默认为443
 ### 6、按需开启泛域名SNI和fastopen
 ### 7、安装完毕后回到主菜单按数字键4查看配置信息
+## 三、注意关闭系统防火墙
+### 例如CentOS、Almalinux自带的firewalld，关闭firewalld命令（一行一行执行）
+```
+systemctl stop firewalld
+systemctl disable firewalld
+```
 
 # **注意不要混淆多个端口**
 ## **后端服务端口**（2525）是ss2022的端口，使用客户端如Loon、Surge等配置时要填写**外部监听端口**（443）,如需配置udp端口则填入后端服务端口（2525）  
