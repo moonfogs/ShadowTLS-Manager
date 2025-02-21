@@ -34,6 +34,27 @@ Shadow-TLS 管理菜单
 ==================================
 (默认：取消):
 ```
+# 部署SS2022+ShadowTLS-v3教程
+## 一、使用翠花大佬的ss-rust脚本部署ss2022
+### 1、执行下方一键代码
+```bash
+wget -O ss-rust.sh --no-check-certificate https://raw.githubusercontent.com/xOS/Shadowsocks-Rust/master/ss-rust.sh && chmod +x ss-rust.sh && ./ss-rust.sh
+```
+### 2、按数字1后回车，输入ss端口，默认为2525
+### 3、加密方式选择13.2022-blake3-aes-128-gcm即可，回车随机生成密码，TCP Fast Open建议关闭
+### 4、记录ss2022配置信息
+## 二、部署ShadowTLS
+### 1、执行下方一键代码
+```bash
+wget -O ShadowTLS_Manager.sh --no-check-certificate https://raw.githubusercontent.com/Kismet0123/ShadowTLS-Manager/refs/heads/main/ShadowTLS_Manager.sh && chmod +x ShadowTLS_Manager.sh && ./ShadowTLS_Manager.sh
+```
+### 2、按数字1后回车，输入上面部署的ss2022端口，在此以2525为例
+### 3、输入TLS伪装域名，需支持TLS1.3
+### 4、输入密码，直接回车则自动生成
+### 5、输入ShadowTLS外部监听端口，即最终使用的端口，默认为443
+### 6、按需开启泛域名SNI和fastopen
+### 7、安装完毕后回到主菜单按数字键4查看配置信息
+
 # 参考资料
 
 ## [ShadowTLS原仓库](https://github.com/ihciah/shadow-tls)
