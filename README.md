@@ -10,6 +10,10 @@ wget -O ShadowTLS_Manager.sh --no-check-certificate https://raw.githubuserconten
 ```
 rm ShadowTLS_Manager.sh
 ```
+### 查看日志
+```
+journalctl -f -o cat -n 100 -u shadow-tls
+```
 ### 操作菜单
 执行命令后，会显示主菜单：
 ```
