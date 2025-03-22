@@ -129,6 +129,8 @@ SS2022+sTLS = ss, 192.168.1.1, 443, encrypt-method=2022-blake3-aes-128-gcm, pass
 
 [SS2022一键部署-翠花](https://github.com/xOS/Shadowsocks-Rust)
 
+[Snell一键部署-翠花](https://github.com/xOS/Snell)
+
 [Snell一键部署-jinqians](https://github.com/jinqians/snell.sh)
 
 # Star增长趋势
