@@ -7,7 +7,8 @@ ShadowTLS 管理脚本，支持一键安装、升级和卸载，默认使用v3(s
 > [!IMPORTANT]
 > ShadowTLS 不包含数据加密和代理请求封装功能，需配合SS、Snell、Trojan等协议使用
 
-**推荐使用SS2022+ShadowTLS**，相比于单独使用SS2022，ShadowTLS在其基础上进行了真实的TLS握手，并且使用 Application Data 封装与解封装数据。在此情况下，中间人观测该流量与正常的https流量特征一致
+**推荐使用SS2022+ShadowTLS**，相比于单独使用SS2022，ShadowTLS在其基础上进行了真实的TLS握手，并且使用 Application Data 封装与解封装数据。在此情况下，中间人观测该流量与正常的https流量特征一致  
+在执行安装时脚本会自动读取ss-rust、xray和singbox配置文件中shadowsocks的配置，以自动识别后段服务端口，并且支持输出Surge、Loon、Shadowrocket、Mihomo和Singbox的配置
 
 ---
 
