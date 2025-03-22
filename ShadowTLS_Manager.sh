@@ -12,14 +12,20 @@ ERROR="${Red_font_prefix}[错误]${RESET}"
 # 配置文件路径
 CONFIG_FILE="/etc/shadowtls/config"
 
-# Shadowsocks 配置文件路径数组（当前仅支持 ss-rust，未来可扩展）
+# Shadowsocks 配置文件路径数组（支持 ss-rust、xray 和 sing-box）
 SS_CONFIG_PATHS=(
-    "/etc/ss-rust/config.json"        # ss-rust 默认路径
+    "/etc/ss-rust/config.json"         # ss-rust 默认路径
+    "/etc/xray/config.json"            # xray 默认路径 1
+    "/usr/local/etc/xray/config.json"  # xray 默认路径 2
+    "/etc/sing-box/config.json"        # sing-box 默认路径 1
+    "/usr/local/etc/sing-box/config.json"  # sing-box 默认路径 2
 )
 
-# Shadowsocks 配置字段映射（工具 -> 字段名，当前仅支持 ss-rust）
+# Shadowsocks 配置字段映射（工具 -> 字段名）
 declare -A SS_FIELD_MAPPINGS=(
     ["ss-rust"]="server_port password method"
+    ["xray"]=".inbounds[0].port .inbounds[0].settings.password .inbounds[0].settings.method"
+    ["sing-box"]=".inbounds[0].listen_port .inbounds[0].password .inbounds[0].method"
 )
 
 # 全局变量
@@ -111,70 +117,79 @@ install_tools() {
 }
 
 # ===========================
-# Shadowsocks Rust 配置读取函数
-get_ssrust_port() {
+# Shadowsocks 配置读取函数
+get_ssrust_configs() {
+    local -a ports=()
+    local -a passwords=()
+    local -a methods=()
+    local -a sources=()
     for config_path in "${SS_CONFIG_PATHS[@]}"; do
         if [ -f "$config_path" ]; then
             local tool_name
             case "$config_path" in
                 *ss-rust*) tool_name="ss-rust" ;;
+                *xray*) tool_name="xray" ;;
+                *sing-box*) tool_name="sing-box" ;;
                 *) continue ;;
             esac
 
-            local fields=(${SS_FIELD_MAPPINGS[$tool_name]})
-            local port_field="${fields[0]}"
-            local port=$(jq -r ".${port_field}" "$config_path" 2>/dev/null)
+            local port password method
+            if [[ "$tool_name" == "ss-rust" ]]; then
+                port=$(jq -r ".server_port" "$config_path" 2>/dev/null)
+                password=$(jq -r ".password" "$config_path" 2>/dev/null)
+                method=$(jq -r ".method" "$config_path" 2>/dev/null)
+            elif [[ "$tool_name" == "xray" ]]; then
+                port=$(jq -r '.inbounds[] | select(.protocol=="shadowsocks") | .port' "$config_path" 2>/dev/null | head -n 1)
+                password=$(jq -r '.inbounds[] | select(.protocol=="shadowsocks") | .settings.password' "$config_path" 2>/dev/null | head -n 1)
+                method=$(jq -r '.inbounds[] | select(.protocol=="shadowsocks") | .settings.method' "$config_path" 2>/dev/null | head -n 1)
+            elif [[ "$tool_name" == "sing-box" ]]; then
+                port=$(jq -r '.inbounds[] | select(.type=="shadowsocks") | .listen_port' "$config_path" 2>/dev/null | head -n 1)
+                password=$(jq -r '.inbounds[] | select(.type=="shadowsocks") | .password' "$config_path" 2>/dev/null | head -n 1)
+                method=$(jq -r '.inbounds[] | select(.type=="shadowsocks") | .method' "$config_path" 2>/dev/null | head -n 1)
+            fi
 
             if [[ -n "$port" && "$port" =~ ^[0-9]+$ && "$port" -ge 1 && "$port" -le 65535 ]]; then
-                echo "$port"
-                return 0
+                ports+=("$port")
+                passwords+=("$password")
+                methods+=("$method")
+                sources+=("$config_path")
             fi
         fi
     done
+    if [[ ${#ports[@]} -gt 0 ]]; then
+        echo "${ports[*]}" > /tmp/ss_ports
+        echo "${passwords[*]}" > /tmp/ss_passwords
+        echo "${methods[*]}" > /tmp/ss_methods
+        echo "${sources[*]}" > /tmp/ss_sources
+        return 0
+    fi
+    return 1
+}
+
+get_ssrust_port() {
+    if get_ssrust_configs; then
+        local ports=($(cat /tmp/ss_ports))
+        echo "${ports[0]}"  # 默认返回第一个端口，具体选择在 install_shadowtls 中处理
+        return 0
+    fi
     return 1
 }
 
 get_ssrust_password() {
-    for config_path in "${SS_CONFIG_PATHS[@]}"; do
-        if [ -f "$config_path" ]; then
-            local tool_name
-            case "$config_path" in
-                *ss-rust*) tool_name="ss-rust" ;;
-                *) continue ;;
-            esac
-
-            local fields=(${SS_FIELD_MAPPINGS[$tool_name]})
-            local password_field="${fields[1]}"
-            local password=$(jq -r ".${password_field}" "$config_path" 2>/dev/null)
-
-            if [[ -n "$password" ]]; then
-                echo "$password"
-                return 0
-            fi
-        fi
-    done
+    if [[ -f /tmp/ss_passwords ]]; then
+        local passwords=($(cat /tmp/ss_passwords))
+        echo "${passwords[0]}"  # 与 view_config 兼容，返回第一个密码
+        return 0
+    fi
     return 1
 }
 
 get_ssrust_method() {
-    for config_path in "${SS_CONFIG_PATHS[@]}"; do
-        if [ -f "$config_path" ]; then
-            local tool_name
-            case "$config_path" in
-                *ss-rust*) tool_name="ss-rust" ;;
-                *) continue ;;
-            esac
-
-            local fields=(${SS_FIELD_MAPPINGS[$tool_name]})
-            local method_field="${fields[2]}"
-            local method=$(jq -r ".${method_field}" "$config_path" 2>/dev/null)
-
-            if [[ -n "$method" ]]; then
-                echo "$method"
-                return 0
-            fi
-        fi
-    done
+    if [[ -f /tmp/ss_methods ]]; then
+        local methods=($(cat /tmp/ss_methods))
+        echo "${methods[0]}"  # 与 view_config 兼容，返回第一个加密方式
+        return 0
+    fi
     return 1
 }
 
@@ -346,22 +361,40 @@ read_config() {
 # 主操作函数
 install_shadowtls() {
     install_tools
-    local ss_port=$(get_ssrust_port)
-    if [[ -n "$ss_port" && "$ss_port" =~ ^[0-9]+$ && "$ss_port" -ge 1 && "$ss_port" -le 65535 ]]; then
-        print_info "检测到 Shadowsocks Rust 端口: $ss_port"
-        read -rp "是否使用此端口作为 Shadow-TLS 后端服务端口？(y/n, 默认: y): " use_ss_port
-        [[ -z "$use_ss_port" ]] && use_ss_port="y"
-        if [[ "$use_ss_port" =~ ^[Yy]$ ]]; then
-            BACKEND_PORT="$ss_port"
+    if get_ssrust_configs; then
+        local ports=($(cat /tmp/ss_ports))
+        local sources=($(cat /tmp/ss_sources))
+        if [[ ${#ports[@]} -eq 1 ]]; then
+            print_info "检测到 Shadowsocks 端口: ${ports[0]} (来源: ${sources[0]})"
+            read -rp "是否使用此端口作为 Shadow-TLS 后端服务端口？(y/n, 默认: y): " use_ss_port
+            [[ -z "$use_ss_port" ]] && use_ss_port="y"
+            if [[ "$use_ss_port" =~ ^[Yy]$ ]]; then
+                BACKEND_PORT="${ports[0]}"
+            else
+                while true; do
+                    read -rp "请输入后端服务端口 (适用于 SS2022、Trojan、Snell 等，端口范围为1-65535): " BACKEND_PORT
+                    if [[ -z "$BACKEND_PORT" ]]; then
+                        print_error "错误：必须输入后端服务端口！"
+                    elif ! [[ "$BACKEND_PORT" =~ ^[0-9]+$ ]] || [ "$BACKEND_PORT" -lt 1 ] || [ "$BACKEND_PORT" -gt 65535 ]; then
+                        print_error "端口号必须在1到65535之间，且为数字"
+                    else
+                        break
+                    fi
+                done
+            fi
         else
+            echo "检测到多个 Shadowsocks 配置："
+            for i in "${!ports[@]}"; do
+                echo "[$i] 端口: ${ports[$i]} (来源: ${sources[$i]})"
+            done
             while true; do
-                read -rp "请输入后端服务端口 (适用于 SS2022、Trojan、Snell 等，端口范围为1-65535): " BACKEND_PORT
-                if [[ -z "$BACKEND_PORT" ]]; then
-                    print_error "错误：必须输入后端服务端口！"
-                elif ! [[ "$BACKEND_PORT" =~ ^[0-9]+$ ]] || [ "$BACKEND_PORT" -lt 1 ] || [ "$BACKEND_PORT" -gt 65535 ]; then
-                    print_error "端口号必须在1到65535之间，且为数字"
-                else
+                read -rp "请选择一个端口 (输入编号，默认: 0): " choice
+                [[ -z "$choice" ]] && choice=0
+                if [[ "$choice" =~ ^[0-9]+$ && "$choice" -ge 0 && "$choice" -lt ${#ports[@]} ]]; then
+                    BACKEND_PORT="${ports[$choice]}"
                     break
+                else
+                    print_error "请输入有效的编号 (0-${#ports[@]}-1)"
                 fi
             done
         fi
@@ -498,13 +531,9 @@ uninstall_shadowtls() {
     print_warning "正在卸载 Shadow-TLS..."
     read -rp "确认卸载吗？(y/n): " confirm
     if [[ "${confirm,,}" == "y" ]]; then
-        # 停止服务
         systemctl stop shadow-tls
         systemctl disable shadow-tls
-
-        # 读取配置文件以获取 EXT_PORT
         if read_config; then
-            # 撤销防火墙规则
             if command -v ufw >/dev/null; then
                 ufw delete allow "$EXT_PORT"/tcp && print_info "已撤销 ufw 对 $EXT_PORT/tcp 的放行规则"
             elif command -v firewall-cmd >/dev/null; then
@@ -513,8 +542,6 @@ uninstall_shadowtls() {
         else
             print_warning "无法读取配置文件，跳过防火墙规则撤销"
         fi
-
-        # 删除文件和服务
         rm -f /usr/local/bin/shadow-tls /etc/systemd/system/shadow-tls.service "$CONFIG_FILE"
         rm -rf /etc/shadowtls
         systemctl daemon-reload
@@ -578,17 +605,38 @@ set_external_port() {
 
 set_backend_port() {
     local current_port="${BACKEND_PORT:-未设置}"
-    local ss_port=$(get_ssrust_port)
-    if [[ -n "$ss_port" && "$ss_port" =~ ^[0-9]+$ && "$ss_port" -ge 1 && "$ss_port" -le 65535 ]]; then
-        print_info "检测到 Shadowsocks Rust 端口: $ss_port"
-        read -rp "是否使用此端口作为 Shadow-TLS 后端服务端口？(y/n, 默认: y): " use_ss_port
-        [[ -z "$use_ss_port" ]] && use_ss_port="y"
-        if [[ "$use_ss_port" =~ ^[Yy]$ ]]; then
-            BACKEND_PORT="$ss_port"
-            write_config
-            update_service_file
-            print_info "后端服务端口已更新为: $BACKEND_PORT"
-            return 0
+    if get_ssrust_configs; then
+        local ports=($(cat /tmp/ss_ports))
+        local sources=($(cat /tmp/ss_sources))
+        if [[ ${#ports[@]} -eq 1 ]]; then
+            print_info "检测到 Shadowsocks 端口: ${ports[0]} (来源: ${sources[0]})"
+            read -rp "是否使用此端口作为 Shadow-TLS 后端服务端口？(y/n, 默认: y): " use_ss_port
+            [[ -z "$use_ss_port" ]] && use_ss_port="y"
+            if [[ "$use_ss_port" =~ ^[Yy]$ ]]; then
+                BACKEND_PORT="${ports[0]}"
+                write_config
+                update_service_file
+                print_info "后端服务端口已更新为: $BACKEND_PORT"
+                return 0
+            fi
+        else
+            echo "检测到多个 Shadowsocks 配置："
+            for i in "${!ports[@]}"; do
+                echo "[$i] 端口: ${ports[$i]} (来源: ${sources[$i]})"
+            done
+            while true; do
+                read -rp "请选择一个端口 (输入编号，默认: 0): " choice
+                [[ -z "$choice" ]] && choice=0
+                if [[ "$choice" =~ ^[0-9]+$ && "$choice" -ge 0 && "$choice" -lt ${#ports[@]} ]]; then
+                    BACKEND_PORT="${ports[$choice]}"
+                    write_config
+                    update_service_file
+                    print_info "后端服务端口已更新为: $BACKEND_PORT"
+                    return 0
+                else
+                    print_error "请输入有效的编号 (0-${#ports[@]}-1)"
+                fi
+            done
         fi
     fi
     while true; do
