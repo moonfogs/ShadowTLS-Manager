@@ -2,7 +2,7 @@
 PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
 export PATH
 
-# 颜色定义（保持原始一行格式）
+# 颜色定义
 Green_font_prefix="\033[32m" && Red_font_prefix="\033[31m" && Green_background_prefix="\033[42;37m" && Red_background_prefix="\033[41;37m" && RESET="\033[0m" && Yellow_font_prefix="\033[0;33m" && Cyan_font_prefix="\033[0;36m"
 
 # 信息前缀
@@ -171,7 +171,12 @@ download_shadowtls() {
     LATEST_RELEASE=$(get_latest_version)
     ARCH_STR=$(get_system_architecture)
     DOWNLOAD_URL="https://github.com/ihciah/shadow-tls/releases/download/${LATEST_RELEASE}/${ARCH_STR}"
-    wget -O /usr/local/bin/shadow-tls "$DOWNLOAD_URL" || { print_error "下载失败"; exit 1; }
+    local retries=3
+    for ((i=0; i<retries; i++)); do
+        wget -O /usr/local/bin/shadow-tls "$DOWNLOAD_URL" --show-progress && break
+        print_error "下载失败，第$((i+1))次重试..."
+        sleep 2
+    done || { print_error "下载失败，请检查网络"; exit 1; }
     chmod a+x /usr/local/bin/shadow-tls
 }
 
@@ -298,6 +303,7 @@ install_shadowtls() {
     create_service
     print_info "外部监听端口设置完毕，正在下载 Shadow-TLS 并生成系统服务配置，请稍候..."
     download_shadowtls "false"
+    configure_firewall
     systemctl daemon-reload
     systemctl enable --now shadow-tls
     sleep 2
@@ -309,6 +315,14 @@ install_shadowtls() {
     fi
     write_config
     echo -e "${Cyan_font_prefix}Shadow-TLS 配置信息已保存至 ${CONFIG_FILE}${RESET}"
+}
+
+configure_firewall() {
+    if command -v ufw >/dev/null; then
+        ufw allow "$EXT_PORT"/tcp && print_info "$EXT_PORT/tcp外部监听端口已放行"
+    elif command -v firewall-cmd >/dev/null; then
+        firewall-cmd --add-port="$EXT_PORT"/tcp --permanent && firewall-cmd --reload && print_info "$EXT_PORT/tcp外部监听端口已放行"
+    fi
 }
 
 check_service_status() {
@@ -427,7 +441,7 @@ set_external_port() {
     local new_port
     read -rp "请输入新的外部监听端口 (当前: $current_port): " new_port
     if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; then
-        print_error "端口号必须在1到65535之间，且为数字"
+        print_error "端口号必须为1-65535之间的整数"
         return 1
     fi
     if check_port_in_use "$new_port"; then
@@ -446,7 +460,7 @@ set_backend_port() {
     while true; do
         read -rp "请输入新的后端服务端口 (当前: $current_port): " new_port
         if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; then
-            print_error "端口号必须在1到65535之间，且为数字"
+            print_error "端口号必须为1-65535之间的整数"
         else
             BACKEND_PORT="$new_port"
             write_config
