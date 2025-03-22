@@ -35,6 +35,15 @@ TLS_DOMAIN=""
 TLS_PASSWORD=""
 WILDCARD_SNI="false"
 FASTOPEN="false"
+RELEASE=""
+
+# 清理临时文件
+cleanup() {
+    rm -f /tmp/ss_ports /tmp/ss_passwords /tmp/ss_methods /tmp/ss_sources
+}
+
+# 注册退出时清理
+trap cleanup EXIT
 
 # ===========================
 # 通用交互提示函数
@@ -69,15 +78,15 @@ check_root() {
 
 check_system_type() {
     if [[ -f /etc/redhat-release ]]; then
-        release="centos"
+        RELEASE="centos"
     elif grep -q -E -i "debian|ubuntu" /etc/issue; then
-        release="debian"
+        RELEASE="debian"
     elif grep -q -E -i "centos|red hat|redhat" /etc/issue; then
-        release="centos"
+        RELEASE="centos"
     elif grep -q -E -i "debian|ubuntu" /proc/version; then
-        release="debian"
+        RELEASE="debian"
     else
-        release="unknown"
+        RELEASE="unknown"
     fi
 }
 
@@ -96,8 +105,7 @@ install_tools() {
     fi
 
     print_info "检测到缺少工具: ${missing_tools[*]}，开始安装..."
-    check_system_type
-    case "$release" in
+    case "$RELEASE" in
         debian)
             apt update && apt install -y "${missing_tools[@]}" || { print_error "安装依赖失败"; exit 1; }
             ;;
@@ -118,7 +126,7 @@ install_tools() {
 
 # ===========================
 # Shadowsocks 配置读取函数
-get_ssrust_configs() {
+get_ss_configs() {
     local -a ports=()
     local -a passwords=()
     local -a methods=()
@@ -166,28 +174,28 @@ get_ssrust_configs() {
     return 1
 }
 
-get_ssrust_port() {
-    if get_ssrust_configs; then
+get_ss_port() {
+    if get_ss_configs; then
         local ports=($(cat /tmp/ss_ports))
-        echo "${ports[0]}"  # 默认返回第一个端口，具体选择在 install_shadowtls 中处理
+        echo "${ports[0]}"
         return 0
     fi
     return 1
 }
 
-get_ssrust_password() {
+get_ss_password() {
     if [[ -f /tmp/ss_passwords ]]; then
         local passwords=($(cat /tmp/ss_passwords))
-        echo "${passwords[0]}"  # 与 view_config 兼容，返回第一个密码
+        echo "${passwords[0]}"
         return 0
     fi
     return 1
 }
 
-get_ssrust_method() {
+get_ss_method() {
     if [[ -f /tmp/ss_methods ]]; then
         local methods=($(cat /tmp/ss_methods))
-        echo "${methods[0]}"  # 与 view_config 兼容，返回第一个加密方式
+        echo "${methods[0]}"
         return 0
     fi
     return 1
@@ -323,21 +331,67 @@ EOF
 }
 
 get_server_ip() {
-    local ip
-    ip=$(hostname -I | awk '{print $1}')
-    echo "${ip:-无法获取IP}"
+    local ipv4=""
+    local ipv6=""
+
+    if command -v ip >/dev/null 2>&1; then
+        ipv4=$(ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+' | grep -v '^127\.' | head -n 1)
+        ipv6=$(ip -6 addr show scope global | grep -oP '(?<=inet6\s)[0-9a-f:]+' | grep -v '^fe80:' | head -n 1)
+    elif command -v ifconfig >/dev/null 2>&1; then
+        ipv4=$(ifconfig | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+' | grep -v '^127\.' | head -n 1)
+        ipv6=$(ifconfig | grep -oP '(?<=inet6\s)[0-9a-f:]+' | grep -v '^fe80:' | head -n 1)
+    fi
+
+    if [[ -z "$ipv4" && -z "$ipv6" ]]; then
+        ipv4=$(curl -s -4 ip.sb 2>/dev/null)
+        ipv6=$(curl -s -6 ip.sb 2>/dev/null)
+    fi
+
+    if [[ -n "$ipv4" && -n "$ipv6" ]]; then
+        echo "$ipv4 $ipv6"
+    elif [[ -n "$ipv4" ]]; then
+        echo "$ipv4"
+    elif [[ -n "$ipv6" ]]; then
+        echo "$ipv6"
+    else
+        print_error "无法获取服务器 IP"
+        return 1
+    fi
+    return 0
+}
+
+urlsafe_base64() {
+    echo -n "$1" | base64 | sed 's/+/-/g; s/\//_/g; s/=//g'
+}
+
+generate_ss_shadowtls_url() {
+    local server_ip="$1"
+    local ss_method="$2"
+    local ss_password="$3"
+    local backend_port="$4"
+    local stls_password="$5"
+    local stls_sni="$6"
+    local listen_port="$7"
+
+    local userinfo=$(urlsafe_base64 "${ss_method}:${ss_password}")
+    local shadow_tls_config="{\"version\":\"3\",\"password\":\"${stls_password}\",\"host\":\"${stls_sni}\",\"port\":\"${listen_port}\",\"address\":\"${server_ip}\"}"
+    local shadow_tls_base64=$(urlsafe_base64 "${shadow_tls_config}")
+    echo "ss://${userinfo}@${server_ip}:${backend_port}?shadow-tls=${shadow_tls_base64}#SS-ShadowTLS-${server_ip}"
 }
 
 write_config() {
     mkdir -p /etc/shadowtls
+    local server_ip=$(get_server_ip) || return 1
     {
-        echo "local_ip=$(get_server_ip)"
+        echo "local_ip=$server_ip"
         echo "password=${TLS_PASSWORD}"
         echo "external_listen_port=${EXT_PORT}"
         echo "disguise_domain=${TLS_DOMAIN}"
         echo "backend_port=${BACKEND_PORT}"
         echo "wildcard_sni=${WILDCARD_SNI}"
         echo "fastopen=${FASTOPEN}"
+        echo "ss_method=$(get_ss_method)"
+        echo "ss_password=$(get_ss_password)"
     } > "$CONFIG_FILE"
     print_info "配置文件已更新"
 }
@@ -357,11 +411,98 @@ read_config() {
     fi
 }
 
+generate_config() {
+    local server_ips="$1"
+    local listen_port="$2"
+    local backend_port="$3"
+    local ss_method="$4"
+    local ss_password="$5"
+    local stls_password="$6"
+    local stls_sni="$7"
+    local fastopen="$8"
+
+    IFS=' ' read -r -a ip_array <<< "$server_ips"
+    for server_ip in "${ip_array[@]}"; do
+        local ip_type="IPv4"
+        local display_ip="$server_ip"
+        if [[ "$server_ip" =~ : ]]; then
+            ip_type="IPv6"
+            display_ip="[$server_ip]"
+        fi
+
+        echo -e "\n${Yellow_font_prefix}================== 服务器配置 ($ip_type) ==================${RESET}"
+        echo -e "${Green_font_prefix}服务器 IP：${server_ip}${RESET}"
+        echo -e "\n${Cyan_font_prefix}Shadowsocks 配置：${RESET}"
+        echo -e "  端口：${backend_port}"
+        echo -e "  加密方式：${ss_method}"
+        echo -e "  密码：${ss_password}"
+        echo -e "\n${Cyan_font_prefix}ShadowTLS 配置：${RESET}"
+        echo -e "  端口：${listen_port}"
+        echo -e "  密码：${stls_password}"
+        echo -e "  伪装SNI：${stls_sni}"
+        echo -e "  版本：3"
+
+        echo -e "\n${Yellow_font_prefix}------------------ Surge 配置 ($ip_type) ------------------${RESET}"
+        echo -e "${Green_font_prefix}SS+sTLS = ss, ${display_ip}, ${listen_port}, encrypt-method=${ss_method}, password=${ss_password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${stls_sni}, shadow-tls-version=3, udp-relay=true, udp-port=${backend_port}${RESET}"
+
+        echo -e "\n${Yellow_font_prefix}------------------ Loon 配置 ($ip_type) ------------------${RESET}"
+        echo -e "${Green_font_prefix}SS+sTLS = Shadowsocks, ${display_ip}, ${listen_port}, ${ss_method}, \"${ss_password}\", shadow-tls-password=${stls_password}, shadow-tls-sni=${stls_sni}, shadow-tls-version=3, udp-port=${backend_port}, ip-mode=${ip_type,,}-only, fast-open=${fastopen}, udp=true${RESET}"
+
+        local ss_url=$(generate_ss_shadowtls_url "$display_ip" "$ss_method" "$ss_password" "$backend_port" "$stls_password" "$stls_sni" "$listen_port")
+        echo -e "\n${Yellow_font_prefix}------------------ Shadowrocket 配置 ($ip_type) ------------------${RESET}"
+        echo -e "${Green_font_prefix}SS + ShadowTLS 链接：${RESET}${ss_url}"
+        echo -e "${Green_font_prefix}二维码链接（复制到浏览器生成）：${RESET}https://cli.im/api/qrcode/code?text=${ss_url}"
+
+        echo -e "\n${Yellow_font_prefix}------------------ Mihomo 配置 ($ip_type) ------------------${RESET}"
+        echo -e "${Green_font_prefix}proxies:${RESET}"
+        echo -e "  - name: SS+sTLS"
+        echo -e "    type: ss"
+        echo -e "    server: ${display_ip}"
+        echo -e "    port: ${listen_port}"
+        echo -e "    cipher: ${ss_method}"
+        echo -e "    password: \"${ss_password}\""
+        echo -e "    plugin: shadow-tls"
+        echo -e "    plugin-opts:"
+        echo -e "      host: \"${stls_sni}\""
+        echo -e "      password: \"${stls_password}\""
+        echo -e "      version: 3"
+
+        echo -e "\n${Yellow_font_prefix}------------------ Sing-box 配置 ($ip_type) ------------------${RESET}"
+        echo -e "${Green_font_prefix}{${RESET}"
+        echo -e "  \"type\": \"shadowsocks\","
+        echo -e "  \"tag\": \"ss2022+sTLS\","
+        echo -e "  \"method\": \"${ss_method}\","
+        echo -e "  \"password\": \"${ss_password}\","
+        echo -e "  \"detour\": \"shadowtls-out\","
+        echo -e "  \"udp_over_tcp\": {"
+        echo -e "    \"enabled\": true,"
+        echo -e "    \"version\": 2"
+        echo -e "  }"
+        echo -e "},"
+        echo -e "{"
+        echo -e "  \"type\": \"shadowtls\","
+        echo -e "  \"tag\": \"shadowtls-out\","
+        echo -e "  \"server\": \"${server_ip}\","
+        echo -e "  \"server_port\": ${listen_port},"
+        echo -e "  \"version\": 3,"
+        echo -e "  \"password\": \"${stls_password}\","
+        echo -e "  \"tls\": {"
+        echo -e "    \"enabled\": true,"
+        echo -e "    \"server_name\": \"${stls_sni}\","
+        echo -e "    \"utls\": {"
+        echo -e "      \"enabled\": true,"
+        echo -e "      \"fingerprint\": \"chrome\""
+        echo -e "    }"
+        echo -e "  }"
+        echo -e "}"
+    done
+}
+
 # ===========================
 # 主操作函数
 install_shadowtls() {
     install_tools
-    if get_ssrust_configs; then
+    if get_ss_configs; then
         local ports=($(cat /tmp/ss_ports))
         local sources=($(cat /tmp/ss_sources))
         if [[ ${#ports[@]} -eq 1 ]]; then
@@ -445,8 +586,28 @@ install_shadowtls() {
         print_error "Shadow-TLS 服务未正常运行，请检查日志。"
         systemctl status shadow-tls
     fi
-    write_config
+    write_config || { print_error "写入配置文件失败"; exit 1; }
     echo -e "${Cyan_font_prefix}Shadow-TLS 配置信息已保存至 ${CONFIG_FILE}${RESET}"
+
+    local ss_method=$(get_ss_method)
+    local ss_password=$(get_ss_password)
+    local server_ips=$(get_server_ip) || { print_error "获取服务器 IP 失败"; exit 1; }
+    clear
+    echo -e "${Green_font_prefix}=== ShadowTLS 安装完成，以下为配置信息 ===${RESET}"
+    echo -e "${Cyan_font_prefix}Shadow-TLS 配置信息：${RESET}"
+    echo -e "本机 IP：${server_ips}"
+    echo -e "外部监听端口：${EXT_PORT}"
+    echo -e "伪装域名：${TLS_DOMAIN}"
+    echo -e "密码：${TLS_PASSWORD}"
+    echo -e "后端服务端口：${BACKEND_PORT}"
+    echo -e "泛域名 SNI：${WILDCARD_SNI}"
+    echo -e "Fastopen：${FASTOPEN}"
+    if [[ -n "$ss_method" && -n "$ss_password" ]]; then
+        echo -e "Shadowsocks 密码：${ss_password}"
+        echo -e "Shadowsocks 加密方式：${ss_method}"
+        echo -e "\n${Yellow_font_prefix}==================================================${RESET}"
+        generate_config "$server_ips" "$EXT_PORT" "$BACKEND_PORT" "$ss_method" "$ss_password" "$TLS_PASSWORD" "$TLS_DOMAIN" "$FASTOPEN"
+    fi
 }
 
 configure_firewall() {
@@ -553,10 +714,11 @@ uninstall_shadowtls() {
 
 view_config() {
     if read_config; then
-        local ss_password=$(get_ssrust_password)
-        local ss_method=$(get_ssrust_method)
+        local ss_password=$(get_ss_password)
+        local ss_method=$(get_ss_method)
+        local server_ips=$(get_server_ip) || { print_error "获取服务器 IP 失败"; return 1; }
         echo -e "${Cyan_font_prefix}Shadow-TLS 配置信息：${RESET}"
-        echo -e "本机 IP：${local_ip}"
+        echo -e "本机 IP：${server_ips}"
         echo -e "外部监听端口：${external_listen_port}"
         echo -e "伪装域名：${disguise_domain}"
         echo -e "密码：${password}"
@@ -566,8 +728,8 @@ view_config() {
         if [[ -n "$ss_password" && -n "$ss_method" ]]; then
             echo -e "Shadowsocks 密码：${ss_password}"
             echo -e "Shadowsocks 加密方式：${ss_method}"
-        else
-            echo -e "Shadowsocks 配置：未检测到有效配置"
+            echo -e "\n${Yellow_font_prefix}==================================================${RESET}"
+            generate_config "$server_ips" "$external_listen_port" "$backend_port" "$ss_method" "$ss_password" "$password" "$disguise_domain" "$fastopen"
         fi
     else
         print_error "未找到 Shadow-TLS 配置信息，请确认已安装 Shadow-TLS"
@@ -598,14 +760,14 @@ set_external_port() {
         return 1
     fi
     EXT_PORT="$new_port"
-    write_config
+    write_config || return 1
     print_info "外部监听端口已更新为: $EXT_PORT"
     return 0
 }
 
 set_backend_port() {
     local current_port="${BACKEND_PORT:-未设置}"
-    if get_ssrust_configs; then
+    if get_ss_configs; then
         local ports=($(cat /tmp/ss_ports))
         local sources=($(cat /tmp/ss_sources))
         if [[ ${#ports[@]} -eq 1 ]]; then
@@ -614,7 +776,7 @@ set_backend_port() {
             [[ -z "$use_ss_port" ]] && use_ss_port="y"
             if [[ "$use_ss_port" =~ ^[Yy]$ ]]; then
                 BACKEND_PORT="${ports[0]}"
-                write_config
+                write_config || return 1
                 update_service_file
                 print_info "后端服务端口已更新为: $BACKEND_PORT"
                 return 0
@@ -629,7 +791,7 @@ set_backend_port() {
                 [[ -z "$choice" ]] && choice=0
                 if [[ "$choice" =~ ^[0-9]+$ && "$choice" -ge 0 && "$choice" -lt ${#ports[@]} ]]; then
                     BACKEND_PORT="${ports[$choice]}"
-                    write_config
+                    write_config || return 1
                     update_service_file
                     print_info "后端服务端口已更新为: $BACKEND_PORT"
                     return 0
@@ -645,7 +807,7 @@ set_backend_port() {
             print_error "端口号必须为1-65535之间的整数"
         else
             BACKEND_PORT="$new_port"
-            write_config
+            write_config || return 1
             update_service_file
             print_info "后端服务端口已更新为: $BACKEND_PORT"
             return 0
