@@ -55,7 +55,7 @@ wget -O ss-rust.sh --no-check-certificate https://raw.githubusercontent.com/xOS/
 wget -O ShadowTLS_Manager.sh --no-check-certificate https://raw.githubusercontent.com/Kismet0123/ShadowTLS-Manager/refs/heads/main/ShadowTLS_Manager.sh && chmod +x ShadowTLS_Manager.sh && ./ShadowTLS_Manager.sh
 ```
 
-2. 按数字1后回车，输入上面部署的ss2022端口，在此以2525为例(脚本可以自动识别已安装的ss端口，确认无误可以直接回车)
+2. 按数字1后回车，输入上面部署的ss2022端口，在此以2525为例 (脚本可以自动识别已安装的ss端口，确认无误可以直接回车)
 3. 输入TLS伪装域名，需支持TLS1.3
 4. 输入密码，直接回车则自动生成
 5. 输入ShadowTLS外部监听端口，即最终使用的端口，默认为443
@@ -64,7 +64,7 @@ wget -O ShadowTLS_Manager.sh --no-check-certificate https://raw.githubuserconten
 
 ### 三、注意关闭系统防火墙或放行相应端口
 
-如果需要启用防火墙，脚本能够自动放行相应端口
+如果需要启用防火墙，脚本能够自动放行相应端口  
 例如CentOS、Almalinux自带的firewalld，关闭firewalld命令（一行一行执行）
 
 ```
