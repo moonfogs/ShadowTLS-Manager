@@ -67,6 +67,32 @@ print_warning() {
     echo -e "${Yellow_font_prefix}[警告]${RESET} $1"
 }
 
+# 放行指定端口和协议
+allow_port() {
+    local port="$1"
+    local protocol="$2"  # tcp 或 udp
+    if command -v ufw >/dev/null; then
+        ufw allow "$port"/"$protocol" && print_info "ufw 已放行 $port/$protocol"
+    elif command -v firewall-cmd >/dev/null; then
+        firewall-cmd --add-port="$port"/"$protocol" --permanent && firewall-cmd --reload && print_info "firewalld 已放行 $port/$protocol"
+    else
+        print_warning "未检测到 ufw 或 firewalld，跳过防火墙配置"
+    fi
+}
+
+# 撤销指定端口和协议的放行规则
+deny_port() {
+    local port="$1"
+    local protocol="$2"  # tcp 或 udp
+    if command -v ufw >/dev/null; then
+        ufw delete allow "$port"/"$protocol" && print_info "ufw 已撤销 $port/$protocol 的放行规则"
+    elif command -v firewall-cmd >/dev/null; then
+        firewall-cmd --remove-port="$port"/"$protocol" --permanent && firewall-cmd --reload && print_info "firewalld 已撤销 $port/$protocol 的放行规则"
+    else
+        print_warning "未检测到 ufw 或 firewalld，跳过防火墙配置"
+    fi
+}
+
 # ===========================
 # 系统和权限检查
 check_root() {
@@ -387,15 +413,15 @@ write_config() {
     mkdir -p /etc/shadowtls
     local server_ip=$(get_server_ip) || return 1
     {
-        echo "local_ip=$server_ip"
-        echo "password=${TLS_PASSWORD}"
-        echo "external_listen_port=${EXT_PORT}"
-        echo "disguise_domain=${TLS_DOMAIN}"
-        echo "backend_port=${BACKEND_PORT}"
-        echo "wildcard_sni=${WILDCARD_SNI}"
-        echo "fastopen=${FASTOPEN}"
-        echo "ss_method=$(get_ss_method)"
-        echo "ss_password=$(get_ss_password)"
+        echo "local_ip=\"$server_ip\""
+        echo "password=\"$TLS_PASSWORD\""
+        echo "external_listen_port=$EXT_PORT"
+        echo "disguise_domain=\"$TLS_DOMAIN\""
+        echo "backend_port=$BACKEND_PORT"
+        echo "wildcard_sni=$WILDCARD_SNI"
+        echo "fastopen=$FASTOPEN"
+        echo "ss_method=\"$(get_ss_method)\""
+        echo "ss_password=\"$(get_ss_password)\""
     } > "$CONFIG_FILE"
     print_info "配置文件已更新"
 }
@@ -615,11 +641,8 @@ install_shadowtls() {
 }
 
 configure_firewall() {
-    if command -v ufw >/dev/null; then
-        ufw allow "$EXT_PORT"/tcp && print_info "$EXT_PORT/tcp外部监听端口已放行"
-    elif command -v firewall-cmd >/dev/null; then
-        firewall-cmd --add-port="$EXT_PORT"/tcp --permanent && firewall-cmd --reload && print_info "$EXT_PORT/tcp外部监听端口已放行"
-    fi
+    allow_port "$EXT_PORT" "tcp"      # 放行外部监听端口 TCP
+    allow_port "$BACKEND_PORT" "udp"  # 放行后端服务端口 UDP
 }
 
 check_service_status() {
@@ -699,11 +722,8 @@ uninstall_shadowtls() {
         systemctl stop shadow-tls
         systemctl disable shadow-tls
         if read_config; then
-            if command -v ufw >/dev/null; then
-                ufw delete allow "$EXT_PORT"/tcp && print_info "已撤销 ufw 对 $EXT_PORT/tcp 的放行规则"
-            elif command -v firewall-cmd >/dev/null; then
-                firewall-cmd --remove-port="$EXT_PORT"/tcp --permanent && firewall-cmd --reload && print_info "已撤销 firewalld 对 $EXT_PORT/tcp 的放行规则"
-            fi
+            deny_port "$EXT_PORT" "tcp"      # 撤销外部监听端口 TCP 放行规则
+            deny_port "$BACKEND_PORT" "udp"  # 撤销后端服务端口 UDP 放行规则
         else
             print_warning "无法读取配置文件，跳过防火墙规则撤销"
         fi
@@ -752,9 +772,9 @@ set_disguise_domain() {
 }
 
 set_external_port() {
-    local current_port="${EXT_PORT:-未设置}"
+    local old_port="${EXT_PORT:-未设置}"
     local new_port
-    read -rp "请输入新的外部监听端口 (当前: $current_port): " new_port
+    read -rp "请输入新的外部监听端口 (当前: $old_port): " new_port
     if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; then
         print_error "端口号必须为1-65535之间的整数"
         return 1
@@ -763,14 +783,22 @@ set_external_port() {
         print_error "端口 ${new_port} 已被占用，请更换端口"
         return 1
     fi
+    if [[ "$old_port" != "未设置" && "$old_port" != "$new_port" ]]; then
+        deny_port "$old_port" "tcp"  # 撤销旧的 TCP 放行规则
+    fi
     EXT_PORT="$new_port"
+    allow_port "$EXT_PORT" "tcp"  # 放行新的 TCP 端口
     write_config || return 1
+    update_service_file
+    systemctl daemon-reload
+    restart_service
     print_info "外部监听端口已更新为: $EXT_PORT"
     return 0
 }
 
 set_backend_port() {
-    local current_port="${BACKEND_PORT:-未设置}"
+    local old_port="${BACKEND_PORT:-未设置}"
+    local new_port
     if get_ss_configs; then
         local ports=($(cat /tmp/ss_ports))
         local sources=($(cat /tmp/ss_sources))
@@ -779,9 +807,15 @@ set_backend_port() {
             read -rp "是否使用此端口作为 Shadow-TLS 后端服务端口？(y/n, 默认: y): " use_ss_port
             [[ -z "$use_ss_port" ]] && use_ss_port="y"
             if [[ "$use_ss_port" =~ ^[Yy]$ ]]; then
+                if [[ "$old_port" != "未设置" && "$old_port" != "${ports[0]}" ]]; then
+                    deny_port "$old_port" "udp"  # 撤销旧的 UDP 放行规则
+                fi
                 BACKEND_PORT="${ports[0]}"
+                allow_port "$BACKEND_PORT" "udp"  # 放行新的 UDP 端口
                 write_config || return 1
                 update_service_file
+                systemctl daemon-reload
+                restart_service
                 print_info "后端服务端口已更新为: $BACKEND_PORT"
                 return 0
             fi
@@ -794,9 +828,15 @@ set_backend_port() {
                 read -rp "请选择一个端口 (输入编号，默认: 0): " choice
                 [[ -z "$choice" ]] && choice=0
                 if [[ "$choice" =~ ^[0-9]+$ && "$choice" -ge 0 && "$choice" -lt ${#ports[@]} ]]; then
+                    if [[ "$old_port" != "未设置" && "$old_port" != "${ports[$choice]}" ]]; then
+                        deny_port "$old_port" "udp"  # 撤销旧的 UDP 放行规则
+                    fi
                     BACKEND_PORT="${ports[$choice]}"
+                    allow_port "$BACKEND_PORT" "udp"  # 放行新的 UDP 端口
                     write_config || return 1
                     update_service_file
+                    systemctl daemon-reload
+                    restart_service
                     print_info "后端服务端口已更新为: $BACKEND_PORT"
                     return 0
                 else
@@ -806,13 +846,19 @@ set_backend_port() {
         fi
     fi
     while true; do
-        read -rp "请输入新的后端服务端口 (当前: $current_port): " new_port
+        read -rp "请输入新的后端服务端口 (当前: $old_port): " new_port
         if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; then
             print_error "端口号必须为1-65535之间的整数"
         else
+            if [[ "$old_port" != "未设置" && "$old_port" != "$new_port" ]]; then
+                deny_port "$old_port" "udp"  # 撤销旧的 UDP 放行规则
+            fi
             BACKEND_PORT="$new_port"
+            allow_port "$BACKEND_PORT" "udp"  # 放行新的 UDP 端口
             write_config || return 1
             update_service_file
+            systemctl daemon-reload
+            restart_service
             print_info "后端服务端口已更新为: $BACKEND_PORT"
             return 0
         fi
