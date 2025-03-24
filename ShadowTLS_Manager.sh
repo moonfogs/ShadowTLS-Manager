@@ -87,7 +87,10 @@ check_system_type() {
         RELEASE="debian"
     else
         RELEASE="unknown"
+        print_error "无法识别的系统发行版，请检查兼容性"
+        exit 1
     fi
+    print_info "检测到系统发行版: $RELEASE"
 }
 
 # 检查并安装依赖工具
@@ -105,6 +108,7 @@ install_tools() {
     fi
 
     print_info "检测到缺少工具: ${missing_tools[*]}，开始安装..."
+    check_system_type  # 在此处调用，确保 RELEASE 被正确设置
     case "$RELEASE" in
         debian)
             apt update && apt install -y "${missing_tools[@]}" || { print_error "安装依赖失败"; exit 1; }
@@ -946,5 +950,4 @@ main_menu() {
 
 # 脚本启动
 check_root
-check_system_type
 main_menu
