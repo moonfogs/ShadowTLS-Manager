@@ -125,7 +125,7 @@ SS2022+sTLS = ss, 192.168.1.1, 443, encrypt-method=2022-blake3-aes-128-gcm, pass
 
 ## ShadowTLS CPU占用率高解决方法
 
-脚本中已提供了修复选项  
+脚本中已提供了修复选项，遇到CPU占用率100%可尝试  
 参考[原仓库issues](https://github.com/ihciah/shadow-tls/issues/109)
 
 ## 推荐项目
