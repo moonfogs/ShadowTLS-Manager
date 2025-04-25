@@ -435,6 +435,7 @@ read_config() {
         BACKEND_PORT="$backend_port"
         WILDCARD_SNI="${wildcard_sni:-false}"
         FASTOPEN="${fastopen:-false}"
+        CPU_FIX_APPLIED="${cpu_fix_applied:-false}"
     else
         print_error "未找到配置文件"
         return 1
@@ -881,8 +882,11 @@ update_service_file() {
     if [[ -f "$SERVICE_FILE" ]]; then
         local wildcard_sni_option=""
         local fastopen_option=""
+        local environment_line=""
         [[ "$WILDCARD_SNI" == "true" ]] && wildcard_sni_option="--wildcard-sni=authed "
         [[ "$FASTOPEN" == "true" ]] && fastopen_option="--fastopen "
+        # 检查是否应用了 CPU 修复
+        [[ "$CPU_FIX_APPLIED" == "true" ]] && environment_line="Environment=MONOIO_FORCE_LEGACY_DRIVER=1"
         cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Shadow-TLS Server Service
@@ -895,6 +899,7 @@ Type=simple
 User=root
 Restart=on-failure
 RestartSec=5s
+${environment_line}
 ExecStartPre=/bin/sh -c "ulimit -n 51200"
 ExecStart=/usr/local/bin/shadow-tls $fastopen_option--v3 --strict server $wildcard_sni_option--listen [::]:${EXT_PORT} --server 127.0.0.1:${BACKEND_PORT} --tls ${TLS_DOMAIN}:443 --password ${TLS_PASSWORD}
 
@@ -904,6 +909,39 @@ EOF
         print_info "服务单元配置文件已更新。"
     else
         print_error "服务单元配置文件不存在，无法更新。"
+    fi
+}
+
+fix_cpu_issue() {
+    local SERVICE_FILE="/etc/systemd/system/shadow-tls.service"
+    if [[ ! -f "$SERVICE_FILE" ]]; then
+        print_error "Shadow-TLS 服务文件 $SERVICE_FILE 不存在，请先安装 Shadow-TLS"
+        return 1
+    fi
+
+    if grep -q "Environment=MONOIO_FORCE_LEGACY_DRIVER=1" "$SERVICE_FILE"; then
+        print_info "环境变量 MONOIO_FORCE_LEGACY_DRIVER=1 已设置，无需重复操作"
+        return 0
+    fi
+
+    sed -i '/\[Service\]/a Environment=MONOIO_FORCE_LEGACY_DRIVER=1' "$SERVICE_FILE" || { print_error "修改服务文件失败"; return 1; }
+
+    if [[ -f "$CONFIG_FILE" ]]; then
+        echo "cpu_fix_applied=true" >> "$CONFIG_FILE"
+    else
+        print_warning "配置文件 $CONFIG_FILE 不存在，跳过记录 CPU 修复状态"
+    fi
+
+    systemctl daemon-reload || { print_error "重载 systemd 配置失败"; return 1; }
+    systemctl restart shadow-tls || { print_error "重启 Shadow-TLS 服务失败"; return 1; }
+
+    sleep 2
+    if systemctl is-active --quiet shadow-tls; then
+        print_info "已成功设置 MONOIO_FORCE_LEGACY_DRIVER=1，Shadow-TLS 服务运行正常"
+    else
+        print_error "Shadow-TLS 服务未正常运行，请检查日志"
+        systemctl status shadow-tls
+        return 1
     fi
 }
 
@@ -964,6 +1002,10 @@ main_menu() {
         echo -e "${Yellow_font_prefix}7. 停止 Shadow-TLS${RESET}"
         echo -e "${Yellow_font_prefix}8. 重启 Shadow-TLS${RESET}"
         echo -e "=================================="
+        echo -e " 问题修复"
+        echo -e "=================================="
+        echo -e "${Yellow_font_prefix}9. 修复 CPU 占用率 100% 问题${RESET}"
+        echo -e "=================================="
         echo -e " 退出"
         echo -e "=================================="
         echo -e "${Yellow_font_prefix}0. 退出${RESET}"
@@ -976,7 +1018,7 @@ main_menu() {
         else
             echo -e " 当前状态：${Red_font_prefix}未安装${RESET}"
         fi
-        read -rp "请选择操作 [0-8]: " choice
+        read -rp "请选择操作 [0-9]: " choice
         case "$choice" in
             1) install_shadowtls ;;
             2) upgrade_shadowtls ;;
@@ -986,6 +1028,7 @@ main_menu() {
             6) start_service ;;
             7) stop_service ;;
             8) restart_service ;;
+            9) fix_cpu_issue ;;
             0) exit 0 ;;
             *) print_error "无效的选择" ;;
         esac
