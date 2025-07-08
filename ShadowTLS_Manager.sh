@@ -282,11 +282,18 @@ check_port_in_use() {
 }
 
 get_latest_version() {
+    local tag_name
     if command -v jq >/dev/null; then
-        curl -s "https://api.github.com/repos/ihciah/shadow-tls/releases/latest" | jq -r '.tag_name'
+        tag_name=$(curl -s "https://api.github.com/repos/ihciah/shadow-tls/releases/latest" | jq -r '.tag_name')
     else
-        curl -s "https://api.github.com/repos/ihciah/shadow-tls/releases/latest" | grep -oP '"tag_name": "\K[^"]+'
-    fi || { print_error "获取最新版本失败，使用默认版本 v0.2.25"; echo "v0.2.25"; }
+        tag_name=$(curl -s "https://api.github.com/repos/ihciah/shadow-tls/releases/latest" | grep -oP '"tag_name": "\K[^"]+')
+    fi
+    if [[ -z "$tag_name" || "$tag_name" == "null" ]]; then
+        print_error "无法获取最新版本，使用默认版本 v0.2.25"
+        echo "v0.2.25"
+    else
+        echo "$tag_name"
+    fi
 }
 
 download_shadowtls() {
