@@ -54,7 +54,7 @@ wget -O ShadowTLS_Manager.sh --no-check-certificate https://raw.githubuserconten
 11. 脚本会输出配置信息，在相关客户端中填写即可，按任意键回到主菜单
 12. 若主菜单显示 “Shadow-TLS 状态：已安装并已启动；ss-rust 状态：已安装并已启动”，则成功完成部署🎉
 
-### 三、注意关闭系统防火墙或放行相应端口
+### 二、注意关闭系统防火墙或放行相应端口
 
 如果已启用防火墙（ufw、firewalld），脚本会自动放行相应端口  
 例如CentOS、Almalinux自带的firewalld，关闭firewalld命令（一行一行执行）
