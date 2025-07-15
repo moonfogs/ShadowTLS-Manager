@@ -9,8 +9,15 @@ Green_font_prefix="\033[32m" && Red_font_prefix="\033[31m" && Green_background_p
 INFO="${Green_font_prefix}[信息]${RESET}"
 ERROR="${Red_font_prefix}[错误]${RESET}"
 
-# 配置文件路径
+# ShadowTLS 配置文件路径
 CONFIG_FILE="/etc/shadowtls/config"
+
+# Shadowsocks Rust 相关路径
+SS_RUST_FOLDER="/etc/ss-rust"
+SS_RUST_FILE="/usr/local/bin/ss-rust"
+SS_RUST_CONF="/etc/ss-rust/config.json"
+SS_RUST_NOW_VER_FILE="/etc/ss-rust/ver.txt"
+SS_RUST_SERVICE_FILE="/etc/systemd/system/ss-rust.service"
 
 # Shadowsocks 配置文件路径数组（支持 ss-rust、xray 和 sing-box）
 SS_CONFIG_PATHS=(
@@ -72,9 +79,9 @@ allow_port() {
     local port="$1"
     local protocol="$2"  # tcp 或 udp
     if command -v ufw >/dev/null; then
-        ufw allow "$port"/"$protocol" && print_info "ufw 已放行 $port/$protocol"
+        ufw allow "$port"/"$protocol" &>/dev/null && print_info "ufw 已放行 $port/$protocol"
     elif command -v firewall-cmd >/dev/null; then
-        firewall-cmd --add-port="$port"/"$protocol" --permanent && firewall-cmd --reload && print_info "firewalld 已放行 $port/$protocol"
+        firewall-cmd --add-port="$port"/"$protocol" --permanent &>/dev/null && firewall-cmd --reload &>/dev/null && print_info "firewalld 已放行 $port/$protocol"
     else
         print_warning "未检测到 ufw 或 firewalld，跳过防火墙配置"
     fi
@@ -85,9 +92,9 @@ deny_port() {
     local port="$1"
     local protocol="$2"  # tcp 或 udp
     if command -v ufw >/dev/null; then
-        ufw delete allow "$port"/"$protocol" && print_info "ufw 已撤销 $port/$protocol 的放行规则"
+        ufw delete allow "$port"/"$protocol" &>/dev/null && print_info "ufw 已撤销 $port/$protocol 的放行规则"
     elif command -v firewall-cmd >/dev/null; then
-        firewall-cmd --remove-port="$port"/"$protocol" --permanent && firewall-cmd --reload && print_info "firewalld 已撤销 $port/$protocol 的放行规则"
+        firewall-cmd --remove-port="$port"/"$protocol" --permanent &>/dev/null && firewall-cmd --reload &>/dev/null && print_info "firewalld 已撤销 $port/$protocol 的放行规则"
     else
         print_warning "未检测到 ufw 或 firewalld，跳过防火墙配置"
     fi
@@ -122,7 +129,7 @@ check_system_type() {
 # 检查并安装依赖工具
 install_tools() {
     local missing_tools=()
-    for tool in wget curl openssl jq; do
+    for tool in wget curl openssl jq xz-utils; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             missing_tools+=("$tool")
         fi
@@ -134,10 +141,11 @@ install_tools() {
     fi
 
     print_info "检测到缺少工具: ${missing_tools[*]}，开始安装..."
-    check_system_type  # 在此处调用，确保 RELEASE 被正确设置
+    check_system_type
     case "$RELEASE" in
         debian)
-            apt update && apt install -y "${missing_tools[@]}" || { print_error "安装依赖失败"; exit 1; }
+            apt-get update
+            apt-get install -y "${missing_tools[@]}" || { print_error "安装依赖失败"; exit 1; }
             ;;
         centos)
             if command -v dnf >/dev/null 2>&1; then
@@ -148,7 +156,8 @@ install_tools() {
             ;;
         *)
             print_warning "未知发行版，尝试使用 apt 安装..."
-            apt update && apt install -y "${missing_tools[@]}" || { print_error "安装依赖失败"; exit 1; }
+            apt-get update
+            apt-get install -y "${missing_tools[@]}" || { print_error "安装依赖失败"; exit 1; }
             ;;
     esac
     print_info "依赖工具安装完成"
@@ -536,10 +545,336 @@ generate_config() {
     done
 }
 
+# ==================================================
+# Shadowsocks-Rust 管理功能 (v2)
+# ==================================================
+
+# 获取 ss-rust 兼容的系统架构
+get_ss_rust_arch() {
+    case "$(uname -m)" in
+        x86_64) echo "x86_64-unknown-linux-gnu" ;;
+        aarch64) echo "aarch64-unknown-linux-gnu" ;;
+        armv7l) echo "armv7-unknown-linux-gnueabihf" ;;
+        *) echo -e "${Red_font_prefix}不支持的系统架构: $(uname -m)${RESET}"; return 1 ;;
+    esac
+}
+
+# 获取 ss-rust 最新版本号
+get_ss_rust_latest_version() {
+    local tag_name
+    tag_name=$(curl -s "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest" | jq -r '.tag_name')
+    if [[ -z "$tag_name" || "$tag_name" == "null" ]]; then
+        print_warning "无法获取最新版本号，将使用预设的回退版本 v1.23.5"
+        echo "v1.23.5"
+    else
+        echo "$tag_name"
+    fi
+}
+
+# 下载并安装 shadowsocks-rust
+download_ss_rust() {
+    local LATEST_RELEASE="$1"
+    
+    print_info "正在准备下载 Shadowsocks-rust 版本: ${LATEST_RELEASE}"
+    
+    local ARCH_STR
+    ARCH_STR=$(get_ss_rust_arch) || return 1
+
+    # 从版本号中去掉 'v' 前缀用于构建URL和文件名（根据官方命名规则）
+    local version_str=${LATEST_RELEASE#v}
+    local DOWNLOAD_URL="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${LATEST_RELEASE}/shadowsocks-v${version_str}.${ARCH_STR}.tar.xz"
+    local TMP_FILE="/tmp/ss-rust.tar.xz"
+
+    print_info "下载链接: $DOWNLOAD_URL"
+    wget -O "$TMP_FILE" "$DOWNLOAD_URL" --show-progress || { print_error "下载失败，请检查网络"; return 1; }
+
+    print_info "解压文件..."
+    mkdir -p /tmp/ss-rust-dist
+    tar -xf "$TMP_FILE" -C /tmp/ss-rust-dist ssserver || { print_error "解压失败"; rm -rf "$TMP_FILE" /tmp/ss-rust-dist; return 1; }
+
+    print_info "安装二进制文件..."
+    mv -f /tmp/ss-rust-dist/ssserver "$SS_RUST_FILE" || { print_error "移动文件失败"; rm -rf "$TMP_FILE" /tmp/ss-rust-dist; return 1; }
+    chmod +x "$SS_RUST_FILE"
+
+    rm -rf "$TMP_FILE" /tmp/ss-rust-dist
+
+    # 记录版本号
+    echo "${LATEST_RELEASE}" > "$SS_RUST_NOW_VER_FILE"
+    print_info "Shadowsocks-rust ${LATEST_RELEASE} 安装/更新成功！"
+}
+
+# 创建 ss-rust 的 systemd 服务文件
+create_ss_rust_service() {
+    cat > "$SS_RUST_SERVICE_FILE" <<EOF
+[Unit]
+Description=Shadowsocks-rust Server Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65535
+ExecStart=${SS_RUST_FILE} -c ${SS_RUST_CONF}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    print_info "ss-rust 系统服务已创建。"
+}
+
+# 卸载 ss-rust
+uninstall_ss_rust() {
+    if [[ ! -f "$SS_RUST_FILE" ]]; then
+        print_error "Shadowsocks-rust 未安装。"
+        return
+    fi
+    print_warning "这将彻底卸载 Shadowsocks-rust 并删除所有配置文件！"
+    read -rp "确认卸载吗？(y/n): " confirm
+    if [[ "${confirm,,}" != "y" ]]; then
+        print_info "取消卸载。"
+        return
+    fi
+
+    systemctl stop ss-rust
+    systemctl disable ss-rust
+    rm -f "$SS_RUST_SERVICE_FILE"
+    rm -f "$SS_RUST_FILE"
+    rm -rf "$SS_RUST_FOLDER" # 删除 config.json 和 ver.txt
+    systemctl daemon-reload
+    print_info "Shadowsocks-rust 已成功卸载。"
+}
+
+# 安装 ss-rust 的完整流程
+install_ss_rust() {
+    if [[ -f "$SS_RUST_FILE" ]]; then
+        print_error "Shadowsocks-rust 已安装，如需重新安装请先卸载。"
+        return
+    fi
+
+    install_tools # 确保依赖已安装
+
+    print_info "开始配置 Shadowsocks-rust..."
+    local port method password tfo
+    
+    # 1. 设置端口
+    while true; do
+        port=$(prompt_with_default "请输入 Shadowsocks-rust 端口 [1-65535]" "8388")
+        if check_port_in_use "$port"; then
+            print_error "端口 ${port} 已被占用，请更换端口。"
+        elif ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+            print_error "端口号必须在1到65535之间。"
+        else
+            break
+        fi
+    done
+
+    # 2. 设置加密方式
+    echo -e "请选择 Shadowsocks-rust 加密方式:
+    ${Green_font_prefix}1.${RESET} 2022-blake3-aes-128-gcm (推荐)
+    ${Green_font_prefix}2.${RESET} 2022-blake3-aes-256-gcm
+    ${Green_font_prefix}3.${RESET} 2022-blake3-chacha20-poly1305
+    ${Green_font_prefix}4.${RESET} aes-256-gcm
+    ${Green_font_prefix}5.${RESET} aes-128-gcm"
+    read -rp "请选择 (默认: 1): " method_choice
+    case "$method_choice" in
+        2) method="2022-blake3-aes-256-gcm" ;;
+        3) method="2022-blake3-chacha20-poly1305" ;;
+        4) method="aes-256-gcm" ;;
+        5) method="aes-128-gcm" ;;
+        *) method="2022-blake3-aes-128-gcm" ;;
+    esac
+    print_info "选择的加密方式: $method"
+
+    # 3. 设置密码
+    read -rp "请输入 Shadowsocks-rust 密码 (留空则自动生成): " input_password
+    if [[ -z "$input_password" ]]; then
+        if [[ "$method" == "2022-blake3-aes-128-gcm" ]]; then
+            password=$(openssl rand -base64 16)
+        elif [[ "$method" == "2022-blake3-aes-256-gcm" || "$method" == "2022-blake3-chacha20-poly1305" ]]; then
+            password=$(openssl rand -base64 32)
+        else
+            password=$(openssl rand -base64 16)
+        fi
+        echo -e "${Cyan_font_prefix}自动生成的密码为: ${password}${RESET}"
+    else
+        password="$input_password"
+    fi
+
+    # 4. 设置 TFO
+    read -rp "是否开启 TCP Fast Open (不推荐，可能导致连接问题)？(y/n, 默认 n): " tfo_choice
+    if [[ "${tfo_choice,,}" == "y" ]]; then
+        tfo="true"
+    else
+        tfo="false"
+    fi
+
+    # 5. 创建配置目录和文件
+    mkdir -p "$SS_RUST_FOLDER"
+    cat > "$SS_RUST_CONF" <<EOF
+{
+    "server": "0.0.0.0",
+    "server_port": ${port},
+    "password": "${password}",
+    "method": "${method}",
+    "fast_open": ${tfo},
+    "mode": "tcp_and_udp"
+}
+EOF
+    print_info "配置文件已写入: $SS_RUST_CONF"
+    
+    # 6. 下载、安装和创建服务
+    local latest_version
+    latest_version=$(get_ss_rust_latest_version) || return
+    download_ss_rust "$latest_version" || return
+    create_ss_rust_service
+    
+    # 7. 启动服务
+    print_info "正在启动 Shadowsocks-rust 服务..."
+    systemctl daemon-reload
+    systemctl enable --now ss-rust
+    sleep 2
+    if systemctl is-active --quiet ss-rust; then
+        print_info "Shadowsocks-rust 服务运行正常。"
+        allow_port "$port" "tcp"
+        allow_port "$port" "udp"
+    else
+        print_error "Shadowsocks-rust 服务未正常运行，请检查日志。"
+        systemctl status ss-rust
+    fi
+}
+
+# 更新 shadowsocks-rust
+update_ss_rust() {
+    if [[ ! -f "$SS_RUST_FILE" ]]; then
+        print_error "Shadowsocks-rust 未安装，无法更新。"
+        return
+    fi
+    
+    local current_version="未知"
+    [[ -f "$SS_RUST_NOW_VER_FILE" ]] && current_version=$(cat "$SS_RUST_NOW_VER_FILE")
+    
+    print_info "正在检查最新版本..."
+    local latest_version
+    latest_version=$(get_ss_rust_latest_version) || return
+    
+    print_info "当前版本: ${current_version}，最新版本: ${latest_version}"
+    if [[ "$current_version" == "$latest_version" ]]; then
+        print_info "当前已是最新版本，无需更新。"
+        return
+    fi
+    
+    read -rp "发现新版本，是否更新？(y/n): " confirm
+    if [[ "${confirm,,}" != "y" ]]; then
+        print_info "取消更新。"
+        return
+    fi
+    
+    print_info "正在停止服务以进行更新..."
+    systemctl stop ss-rust
+    
+    # 强制重新下载最新版本
+    download_ss_rust "$latest_version"
+    
+    print_info "正在重启服务..."
+    systemctl daemon-reload
+    systemctl restart ss-rust
+    sleep 2
+    if systemctl is-active --quiet ss-rust; then
+        print_info "Shadowsocks-rust 更新成功，服务已恢复运行。"
+    else
+        print_error "服务启动失败，请检查日志！"
+        systemctl status ss-rust
+    fi
+}
+
+# ss-rust 管理菜单
+ss_rust_menu() {
+    while true; do
+        clear
+        echo -e "\n${Cyan_font_prefix}Shadowsocks-rust 管理菜单${RESET}"
+        echo -e "=================================="
+        if [[ -f "$SS_RUST_FILE" ]]; then
+            local current_version="未知"
+            [[ -f "$SS_RUST_NOW_VER_FILE" ]] && current_version=$(cat "$SS_RUST_NOW_VER_FILE")
+            echo -e " 当前状态：${Green_font_prefix}已安装 (版本: $current_version)${RESET}"
+            if systemctl is-active --quiet ss-rust; then
+                echo -e " 服务状态：${Green_font_prefix}运行中${RESET}"
+            else
+                echo -e " 服务状态：${Red_font_prefix}未运行${RESET}"
+            fi
+            echo -e "----------------------------------"
+            echo -e "${Yellow_font_prefix}1. 启动 ss-rust${RESET}"
+            echo -e "${Yellow_font_prefix}2. 停止 ss-rust${RESET}"
+            echo -e "${Yellow_font_prefix}3. 重启 ss-rust${RESET}"
+            echo -e "${Yellow_font_prefix}4. 更新 ss-rust${RESET}"
+            echo -e "${Yellow_font_prefix}5. 卸载 ss-rust${RESET}"
+        else
+            echo -e " 当前状态：${Red_font_prefix}未安装${RESET}"
+            echo -e "----------------------------------"
+            echo -e "${Yellow_font_prefix}1. 安装 ss-rust${RESET}"
+        fi
+        echo -e "=================================="
+        echo -e "${Yellow_font_prefix}0. 返回主菜单${RESET}"
+
+        read -rp "请选择操作: " choice
+        
+        clear
+        
+        if [[ -f "$SS_RUST_FILE" ]]; then
+            case "$choice" in
+                1) systemctl start ss-rust && print_info "服务已启动" ;;
+                2) systemctl stop ss-rust && print_info "服务已停止" ;;
+                3) systemctl restart ss-rust && print_info "服务已重启" ;;
+                4) update_ss_rust ;;
+                5) uninstall_ss_rust; break ;;
+                0) break ;;
+                *) print_error "无效的选择" ;;
+            esac
+        else
+            case "$choice" in
+                1) install_ss_rust ;;
+                0) break ;;
+                *) print_error "无效的选择" ;;
+            esac
+        fi
+        
+        echo
+        read -n 1 -s -r -p "按任意键继续..."
+    done
+}
+
 # ===========================
 # 主操作函数
 install_shadowtls() {
     install_tools
+    # 检查 ss 配置，如果不存在，则询问是否安装 ss-rust
+    if ! get_ss_configs; then
+        print_warning "未在本机检测到已配置的 Shadowsocks (ss-rust, xray, sing-box)。"
+        read -rp "是否需要现在为您安装并配置 Shadowsocks-rust? (y/n, 默认 y): " install_ss_now
+        if [[ -z "$install_ss_now" || "${install_ss_now,,}" == "y" ]]; then
+            install_ss_rust
+            if [[ ! -f "$SS_RUST_FILE" ]]; then
+                print_error "Shadowsocks-rust 安装失败，无法继续安装 Shadow-TLS。"
+                return 1
+            fi
+        else
+            while true; do
+                read -rp "请输入后端服务端口 (适用于 SS2022、Trojan、Snell 等，端口范围为1-65535): " BACKEND_PORT
+                if [[ -z "$BACKEND_PORT" ]]; then
+                    print_error "错误：必须输入后端服务端口！"
+                elif ! [[ "$BACKEND_PORT" =~ ^[0-9]+$ ]] || [ "$BACKEND_PORT" -lt 1 ] || [ "$BACKEND_PORT" -gt 65535 ]; then
+                    print_error "端口号必须在1到65535之间，且为数字"
+                else
+                    break
+                fi
+            done
+        fi
+    fi
+
+    # 重新执行 get_ss_configs 来填充后端端口等信息
     if get_ss_configs; then
         local ports=($(cat /tmp/ss_ports))
         local sources=($(cat /tmp/ss_sources))
@@ -573,21 +908,10 @@ install_shadowtls() {
                     BACKEND_PORT="${ports[$choice]}"
                     break
                 else
-                    print_error "请输入有效的编号 (0-${#ports[@]}-1)"
+                    print_error "请输入有效的编号 (0-$((${#ports[@]}-1)))"
                 fi
             done
         fi
-    else
-        while true; do
-            read -rp "请输入后端服务端口 (适用于 SS2022、Trojan、Snell 等，端口范围为1-65535): " BACKEND_PORT
-            if [[ -z "$BACKEND_PORT" ]]; then
-                print_error "错误：必须输入后端服务端口！"
-            elif ! [[ "$BACKEND_PORT" =~ ^[0-9]+$ ]] || [ "$BACKEND_PORT" -lt 1 ] || [ "$BACKEND_PORT" -gt 65535 ]; then
-                print_error "端口号必须在1到65535之间，且为数字"
-            else
-                break
-            fi
-        done
     fi
 
     TLS_DOMAIN=$(prompt_valid_domain)
@@ -848,7 +1172,7 @@ set_backend_port() {
                     print_info "后端服务端口已更新为: $BACKEND_PORT"
                     return 0
                 else
-                    print_error "请输入有效的编号 (0-${#ports[@]}-1)"
+                    print_error "请输入有效的编号 (0-$((${#ports[@]}-1)))"
                 fi
             done
         fi
@@ -990,51 +1314,81 @@ set_config() {
 main_menu() {
     while true; do
         clear
-        echo -e "\n${Cyan_font_prefix}Shadow-TLS 管理菜单${RESET}"
+        echo -e "\n${Cyan_font_prefix}Shadow-TLS & Shadowsocks-rust 综合管理菜单${RESET}"
         echo -e "=================================="
-        echo -e " 安装与更新"
+        echo -e " Shadow-TLS 管理"
         echo -e "=================================="
         echo -e "${Yellow_font_prefix}1. 安装 Shadow-TLS${RESET}"
         echo -e "${Yellow_font_prefix}2. 升级 Shadow-TLS${RESET}"
         echo -e "${Yellow_font_prefix}3. 卸载 Shadow-TLS${RESET}"
+        echo -e "${Yellow_font_prefix}4. 查看/修改 Shadow-TLS 配置${RESET}"
+        echo -e "${Yellow_font_prefix}5. 控制 Shadow-TLS 服务 (启停/重启)${RESET}"
         echo -e "=================================="
-        echo -e " 配置管理"
+        echo -e " Shadowsocks-rust 管理"
         echo -e "=================================="
-        echo -e "${Yellow_font_prefix}4. 查看 Shadow-TLS 配置信息${RESET}"
-        echo -e "${Yellow_font_prefix}5. 修改 Shadow-TLS 配置${RESET}"
-        echo -e "=================================="
-        echo -e " 服务控制"
-        echo -e "=================================="
-        echo -e "${Yellow_font_prefix}6. 启动 Shadow-TLS${RESET}"
-        echo -e "${Yellow_font_prefix}7. 停止 Shadow-TLS${RESET}"
-        echo -e "${Yellow_font_prefix}8. 重启 Shadow-TLS${RESET}"
+        echo -e "${Yellow_font_prefix}6. 管理 Shadowsocks-rust${RESET}"
         echo -e "=================================="
         echo -e " 问题修复"
         echo -e "=================================="
-        echo -e "${Yellow_font_prefix}9. 修复 CPU 占用率 100% 问题${RESET}"
+        echo -e "${Yellow_font_prefix}9. 修复 Shadow-TLS CPU 100% 问题${RESET}"
         echo -e "=================================="
         echo -e " 退出"
         echo -e "=================================="
         echo -e "${Yellow_font_prefix}0. 退出${RESET}"
+        
+        echo -e "----------------------------------"
         if [[ -e /usr/local/bin/shadow-tls ]]; then
             if systemctl is-active --quiet shadow-tls; then
-                echo -e " 当前状态：${Green_font_prefix}已安装并已启动${RESET}"
+                echo -e " Shadow-TLS 状态：${Green_font_prefix}已安装并已启动${RESET}"
             else
-                echo -e " 当前状态：${Green_font_prefix}已安装${RESET} 但 ${Red_font_prefix}未启动${RESET}"
+                echo -e " Shadow-TLS 状态：${Green_font_prefix}已安装${RESET} 但 ${Red_font_prefix}未启动${RESET}"
             fi
         else
-            echo -e " 当前状态：${Red_font_prefix}未安装${RESET}"
+            echo -e " Shadow-TLS 状态：${Red_font_prefix}未安装${RESET}"
         fi
+        if [[ -e "$SS_RUST_FILE" ]]; then
+            if systemctl is-active --quiet ss-rust; then
+                echo -e " ss-rust 状态：   ${Green_font_prefix}已安装并已启动${RESET}"
+            else
+                echo -e " ss-rust 状态：   ${Green_font_prefix}已安装${RESET} 但 ${Red_font_prefix}未启动${RESET}"
+            fi
+        else
+            echo -e " ss-rust 状态：   ${Red_font_prefix}未安装${RESET}"
+        fi
+        echo -e "----------------------------------"
+
         read -rp "请选择操作 [0-9]: " choice
         case "$choice" in
             1) install_shadowtls ;;
             2) upgrade_shadowtls ;;
             3) uninstall_shadowtls ;;
-            4) view_config ;;
-            5) set_config ;;
-            6) start_service ;;
-            7) stop_service ;;
-            8) restart_service ;;
+            4) 
+                if [[ -f "$CONFIG_FILE" ]]; then
+                    view_config
+                    echo
+                    read -rp "是否需要修改配置? (y/n): " mod_choice
+                    if [[ "${mod_choice,,}" == "y" ]]; then
+                        set_config
+                    fi
+                else
+                    print_error "未安装 Shadow-TLS，无法查看或修改配置。"
+                fi
+                ;;
+            5) 
+                if [[ ! -f /usr/local/bin/shadow-tls ]]; then
+                    print_error "未安装 Shadow-TLS，无法控制服务。"
+                else
+                    echo "1.启动 2.停止 3.重启"
+                    read -rp "请选择: " srv_choice
+                    case "$srv_choice" in
+                        1) start_service ;;
+                        2) stop_service ;;
+                        3) restart_service ;;
+                        *) print_error "无效选择" ;;
+                    esac
+                fi
+                ;;
+            6) ss_rust_menu ;;
             9) fix_cpu_issue ;;
             0) exit 0 ;;
             *) print_error "无效的选择" ;;
