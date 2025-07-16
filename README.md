@@ -47,7 +47,7 @@ wget -O ShadowTLS_Manager.sh --no-check-certificate https://raw.githubuserconten
 4. 回车使用默认8388端口或手动输入ss节点端口
 5. 回车选择2022-blake3-aes-128-gcm加密即可，然后回车生成ss密码（不建议自定义，SS2022对于密码有特殊格式长度要求），TCP Fast Open建议关闭
 6. 回车确认使用刚刚输入的端口作为后端服务端口
-7. 回车使用默认域名或手动输入伪装域名，需支持TLS1.3（若不想使用默认域名可以参考readme下方链接）
+7. 回车使用默认域名或手动输入伪装域名，需支持TLS1.3（若不想使用默认域名可以参考下方“ShadowTLS伪装域名选择”）
 8. 回车生成ShadowTLS密码
 9. 输入ShadowTLS外部监听端口，即客户端中最终使用的端口，默认为443
 10. 按需开启泛域名SNI，fastopen依然建议关闭
