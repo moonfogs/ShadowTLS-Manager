@@ -715,7 +715,7 @@ install_ss_rust() {
     mkdir -p "$SS_RUST_FOLDER"
     cat > "$SS_RUST_CONF" <<EOF
 {
-    "server": "0.0.0.0",
+    "server": "::",
     "server_port": ${port},
     "password": "${password}",
     "method": "${method}",
