@@ -380,30 +380,73 @@ get_server_ip() {
     local ipv4=""
     local ipv6=""
 
-    if command -v ip >/dev/null 2>&1; then
-        ipv4=$(ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+' | grep -v '^127\.' | head -n 1)
-        ipv6=$(ip -6 addr show scope global | grep -oP '(?<=inet6\s)[0-9a-f:]+' | grep -v '^fe80:' | head -n 1)
-    elif command -v ifconfig >/dev/null 2>&1; then
-        ipv4=$(ifconfig | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+' | grep -v '^127\.' | head -n 1)
-        ipv6=$(ifconfig | grep -oP '(?<=inet6\s)[0-9a-f:]+' | grep -v '^fe80:' | head -n 1)
+    # --- IPv4 检测 ---
+    # 优先通过外部服务检测，以兼容NAT环境
+    local ipv4_services=("https://api.ip.sb/ip" "https://ipinfo.io/ip" "https://ipv4.icanhazip.com")
+    print_info "正在通过外部服务检测 IPv4 公网地址..."
+    for service in "${ipv4_services[@]}"; do
+        ipv4=$(curl -s -4 -m 5 "$service" | tr -d '\n')
+        if [[ $? -eq 0 && -n "$ipv4" ]]; then
+            print_info "检测到 IPv4 地址: $ipv4 (来源: $service)"
+            break
+        else
+            ipv4=""
+        fi
+    done
+
+    # 如果所有外部服务都失败了，则回退本地网络接口获取
+    if [[ -z "$ipv4" ]]; then
+        print_warning "外部服务检测 IPv4 失败，尝试从本地网络接口获取..."
+        if command -v ip >/dev/null 2>&1; then
+            ipv4=$(ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+' | grep -v '^127\.' | head -n 1)
+        elif command -v ifconfig >/dev/null 2>&1; then
+            ipv4=$(ifconfig | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+' | grep -v '^127\.' | head -n 1)
+        fi
     fi
 
-    if [[ -z "$ipv4" && -z "$ipv6" ]]; then
-        ipv4=$(curl -s -4 ip.sb 2>/dev/null)
-        ipv6=$(curl -s -6 ip.sb 2>/dev/null)
+    # --- IPv6 检测 ---
+    local ipv6_services=("https://api-ipv6.ip.sb/ip" "https://v6.ident.me" "https://ipv6.icanhazip.com")
+    print_info "正在通过外部服务检测 IPv6 公网地址..."
+    for service in "${ipv6_services[@]}"; do
+        ipv6=$(curl -s -6 -m 5 "$service" | tr -d '\n')
+        if [[ $? -eq 0 && -n "$ipv6" ]]; then
+            print_info "检测到 IPv6 地址: $ipv6 (来源: $service)"
+            break
+        else
+            ipv6=""
+        fi
+    done
+
+    if [[ -z "$ipv6" ]]; then
+        print_warning "外部服务检测 IPv6 失败，尝试从本地网络接口获取..."
+        if command -v ip >/dev/null 2>&1; then
+            ipv6=$(ip -6 addr show scope global | grep -oP '(?<=inet6\s)[0-9a-f:]+' | grep -v '^fe80:' | head -n 1)
+        elif command -v ifconfig >/dev/null 2>&1; then
+            ipv6=$(ifconfig | grep -oP '(?<=inet6\s)[0-9a-f:]+' | grep -v '^fe80:' | head -n 1)
+        fi
     fi
 
-    if [[ -n "$ipv4" && -n "$ipv6" ]]; then
-        echo "$ipv4 $ipv6"
-    elif [[ -n "$ipv4" ]]; then
-        echo "$ipv4"
-    elif [[ -n "$ipv6" ]]; then
-        echo "$ipv6"
-    else
-        print_error "无法获取服务器 IP"
+    # --- 组合并返回结果 ---
+    local result=""
+    if [[ -n "$ipv4" ]]; then
+        result="$ipv4"
+    fi
+    if [[ -n "$ipv6" ]]; then
+        # 如果ipv4和ipv6都存在，用空格隔开
+        if [[ -n "$result" ]]; then
+            result="$result $ipv6"
+        else
+            result="$ipv6"
+        fi
+    fi
+
+    if [[ -z "$result" ]]; then
+        print_error "无法获取任何有效的公网 IP 地址。"
         return 1
+    else
+        echo "$result"
+        return 0
     fi
-    return 0
 }
 
 urlsafe_base64() {
