@@ -541,7 +541,7 @@ generate_config() {
         local ss_url=$(generate_ss_shadowtls_url "$display_ip" "$ss_method" "$ss_password" "$backend_port" "$stls_password" "$stls_sni" "$listen_port")
         echo -e "\n${Yellow_font_prefix}------------------ Shadowrocket 配置 ($ip_type) ------------------${RESET}"
         echo -e "${Green_font_prefix}SS + ShadowTLS 链接：${RESET}${ss_url}"
-        echo -e "${Green_font_prefix}二维码链接（复制到浏览器生成）：${RESET}https://cli.im/api/qrcode/code?text=${ss_url}"
+        echo -e "${Green_font_prefix}二维码链接（复制到浏览器生成）：${RESET}https://api.cl2wm.cn/api/qrcode/code?text=${ss_url}"
 
         echo -e "\n${Yellow_font_prefix}------------------ Mihomo 配置 ($ip_type) ------------------${RESET}"
         echo -e "${Green_font_prefix}proxies:${RESET}"
