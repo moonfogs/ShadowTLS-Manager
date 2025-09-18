@@ -382,10 +382,10 @@ get_server_ip() {
 
     # --- IPv4 检测 ---
     # 优先通过外部服务检测，以兼容NAT环境
-    local ipv4_services=("https://api.ip.sb/ip" "https://ipinfo.io/ip" "https://ipv4.icanhazip.com")
+    local ipv4_services=("http://ipinfo.io/ip" "http://api.ip.sb/ip" "http://members.3322.org/dyndns/getip")
     print_info "正在通过外部服务检测 IPv4 公网地址..."
     for service in "${ipv4_services[@]}"; do
-        ipv4=$(curl -s -4 -m 5 "$service" | tr -d '\n')
+        ipv4=$(wget -qO- -4 -t1 -T2 "$service" | tr -d '\n')
         if [[ $? -eq 0 && -n "$ipv4" ]]; then
             print_info "检测到 IPv4 地址: $ipv4 (来源: $service)"
             break
@@ -405,10 +405,10 @@ get_server_ip() {
     fi
 
     # --- IPv6 检测 ---
-    local ipv6_services=("https://api-ipv6.ip.sb/ip" "https://v6.ident.me" "https://ipv6.icanhazip.com")
+    local ipv6_services=("http://ifconfig.co")
     print_info "正在通过外部服务检测 IPv6 公网地址..."
     for service in "${ipv6_services[@]}"; do
-        ipv6=$(curl -s -6 -m 5 "$service" | tr -d '\n')
+        ipv6=$(wget -qO- -6 -t1 -T2 "$service" | tr -d '\n')
         if [[ $? -eq 0 && -n "$ipv6" ]]; then
             print_info "检测到 IPv6 地址: $ipv6 (来源: $service)"
             break
