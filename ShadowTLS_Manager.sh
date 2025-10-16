@@ -37,6 +37,7 @@ WILDCARD_SNI="false"
 FASTOPEN="false"
 RELEASE=""
 CPU_FIX_APPLIED="false"
+SERVER_IP_CACHE=""
 
 # 日志文件
 LOG_FILE="/var/log/shadowtls-manager.log"
@@ -503,93 +504,78 @@ EOF
     print_info "系统服务已配置完成"
 }
 
-# 修复 IP 获取函数
+# 完全重写 IP 获取函数，使用推荐的接口并避免日志污染
 get_server_ip() {
+    # 如果有缓存，直接返回缓存结果
+    if [[ -n "$SERVER_IP_CACHE" ]]; then
+        echo "$SERVER_IP_CACHE"
+        return 0
+    fi
+    
     local ipv4=""
     local ipv6=""
-    local valid_ips=()
-
-    # --- IPv4 检测 ---
-    print_info "正在检测 IPv4 地址..."
+    local temp_ip=""
     
-    # 方法1: 通过外部服务检测
-    local ipv4_services=(
+    # 使用推荐的 IP 查询接口
+    local ip_services=(
+        "https://iplark.com/ipstack"
+        "https://api.live.bilibili.com/xlive/web-room/v1/index/getIpInfo"
         "https://api.ipify.org"
-        "https://ipinfo.io/ip" 
-        "https://api.ip.sb/ip"
-        "https://checkip.amazonaws.com"
+        "https://ipinfo.io/ip"
     )
     
-    for service in "${ipv4_services[@]}"; do
-        ipv4=$(curl -s --connect-timeout 5 -4 "$service" | tr -d '\n' | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}')
-        if [[ -n "$ipv4" && "$ipv4" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-            print_info "通过 $service 检测到 IPv4: $ipv4"
-            break
+    # 尝试获取 IPv4 地址
+    for service in "${ip_services[@]}"; do
+        if [[ "$service" == "https://iplark.com/ipstack" ]]; then
+            temp_ip=$(curl -s --connect-timeout 5 "$service" | jq -r '.ip' 2>/dev/null)
+        elif [[ "$service" == "https://api.live.bilibili.com/xlive/web-room/v1/index/getIpInfo" ]]; then
+            temp_ip=$(curl -s --connect-timeout 5 "$service" | jq -r '.data.addr' 2>/dev/null)
         else
-            ipv4=""
+            temp_ip=$(curl -s --connect-timeout 5 "$service" | tr -d '\n')
         fi
+        
+        if [[ -n "$temp_ip" && "$temp_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            ipv4="$temp_ip"
+            log_message "INFO" "通过 $service 获取到 IPv4: $ipv4"
+            break
+        fi
+        temp_ip=""
     done
-
-    # 方法2: 从网络接口获取
+    
+    # 如果推荐的接口都失败了，尝试备用方法
     if [[ -z "$ipv4" ]]; then
-        print_warning "外部服务检测 IPv4 失败，尝试从本地网络接口获取..."
+        # 从网络接口获取
         if command -v ip >/dev/null 2>&1; then
             ipv4=$(ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -vE '^(127\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.)' | head -n1)
         elif command -v ifconfig >/dev/null 2>&1; then
             ipv4=$(ifconfig | grep -oP 'inet (addr:)?\K(\d{1,3}\.){3}\d{1,3}' | grep -vE '^(127\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.)' | head -n1)
         fi
         if [[ -n "$ipv4" ]]; then
-            print_info "从网络接口检测到 IPv4: $ipv4"
+            log_message "INFO" "从网络接口获取到 IPv4: $ipv4"
         fi
     fi
-
-    # --- IPv6 检测 ---
-    print_info "正在检测 IPv6 地址..."
     
-    local ipv6_services=(
-        "https://api6.ipify.org"
-        "https://ipv6.seeip.org"
-    )
-    
-    for service in "${ipv6_services[@]}"; do
-        ipv6=$(curl -s --connect-timeout 5 -6 "$service" | tr -d '\n' | grep -Eo '([a-f0-9:]+:+)+[a-f0-9]+')
-        if [[ -n "$ipv6" ]]; then
-            print_info "通过 $service 检测到 IPv6: $ipv6"
-            break
-        else
-            ipv6=""
-        fi
-    done
-
-    if [[ -z "$ipv6" ]]; then
-        print_warning "外部服务检测 IPv6 失败，尝试从本地网络接口获取..."
-        if command -v ip >/dev/null 2>&1; then
-            ipv6=$(ip -6 addr show scope global | grep -oP '(?<=inet6\s)[0-9a-f:]+' | grep -vE '^(fe80:|::1)' | head -n1)
-        elif command -v ifconfig >/dev/null 2>&1; then
-            ipv6=$(ifconfig | grep -oP 'inet6 (addr:)?\K([0-9a-fA-F:]+)' | grep -vE '^(fe80:|::1)' | head -n1)
-        fi
-        if [[ -n "$ipv6" ]]; then
-            print_info "从网络接口检测到 IPv6: $ipv6"
-        fi
-    fi
-
-    # 验证和收集有效的 IP 地址
+    # 验证 IP 地址格式
     if [[ -n "$ipv4" && "$ipv4" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-        valid_ips+=("$ipv4")
-    fi
-    
-    if [[ -n "$ipv6" ]]; then
-        valid_ips+=("$ipv6")
-    fi
-
-    if [[ ${#valid_ips[@]} -eq 0 ]]; then
-        print_error "无法获取任何有效的公网 IP 地址"
+        SERVER_IP_CACHE="$ipv4"
+        echo "$ipv4"
+        return 0
+    else
+        log_message "ERROR" "无法获取有效的公网 IP 地址"
         return 1
     fi
+}
 
-    # 返回第一个有效的 IP（通常是 IPv4）
-    echo "${valid_ips[0]}"
-    return 0
+# 静默版本的 IP 获取函数，用于配置生成
+get_server_ip_silent() {
+    if [[ -n "$SERVER_IP_CACHE" ]]; then
+        echo "$SERVER_IP_CACHE"
+        return 0
+    fi
+    
+    # 强制重新获取并缓存
+    SERVER_IP_CACHE=$(get_server_ip 2>/dev/null)
+    echo "$SERVER_IP_CACHE"
 }
 
 urlsafe_base64() {
@@ -649,6 +635,7 @@ read_config() {
             WILDCARD_SNI="${wildcard_sni:-false}"
             FASTOPEN="${fastopen:-false}"
             CPU_FIX_APPLIED="${cpu_fix_applied:-false}"
+            SERVER_IP_CACHE="${local_ip:-}"
             return 0
         else
             print_error "配置文件格式错误"
@@ -660,6 +647,7 @@ read_config() {
     fi
 }
 
+# 清理的配置生成函数
 generate_config() {
     local server_ip="$1"
     local listen_port="$2"
@@ -672,10 +660,6 @@ generate_config() {
 
     local ip_type="IPv4"
     local display_ip="$server_ip"
-    if [[ "$server_ip" =~ : ]]; then
-        ip_type="IPv6"
-        display_ip="[$server_ip]"
-    fi
 
     echo -e "\n${Yellow_font_prefix}================== 服务器配置 ($ip_type) ==================${RESET}"
     echo -e "${Green_font_prefix}服务器 IP：${server_ip}${RESET}"
@@ -693,12 +677,12 @@ generate_config() {
     echo -e "${Green_font_prefix}SS+sTLS = ss, ${display_ip}, ${listen_port}, encrypt-method=${ss_method}, password=${ss_password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${stls_sni}, shadow-tls-version=3, udp-relay=true, udp-port=${backend_port}${RESET}"
 
     echo -e "\n${Yellow_font_prefix}------------------ Loon 配置 ($ip_type) ------------------${RESET}"
-    echo -e "${Green_font_prefix}SS+sTLS = Shadowsocks, ${display_ip}, ${listen_port}, ${ss_method}, \"${ss_password}\", shadow-tls-password=${stls_password}, shadow-tls-sni=${stls_sni}, shadow-tls-version=3, udp-port=${backend_port}, ip-mode=${ip_type,,}-only, fast-open=${fastopen}, udp=true${RESET}"
+    echo -e "${Green_font_prefix}SS+sTLS = Shadowsocks, ${display_ip}, ${listen_port}, ${ss_method}, \"${ss_password}\", shadow-tls-password=${stls_password}, shadow-tls-sni=${stls_sni}, shadow-tls-version=3, udp-port=${backend_port}, ip-mode=ipv4-only, fast-open=${fastopen}, udp=true${RESET}"
 
     local ss_url=$(generate_ss_shadowtls_url "$display_ip" "$ss_method" "$ss_password" "$backend_port" "$stls_password" "$stls_sni" "$listen_port")
     echo -e "\n${Yellow_font_prefix}------------------ Shadowrocket 配置 ($ip_type) ------------------${RESET}"
     echo -e "${Green_font_prefix}SS + ShadowTLS 链接：${RESET}${ss_url}"
-    echo -e "${Green_font_prefix}二维码链接（复制到浏览器生成）：${RESET}https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${ss_url//#/%23}"
+    echo -e "${Green_font_prefix}二维码链接（复制到浏览器生成）：${RESET}https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=$(echo -n "$ss_url" | jq -s -R -r @uri)"
 
     echo -e "\n${Yellow_font_prefix}------------------ Mihomo 配置 ($ip_type) ------------------${RESET}"
     echo -e "${Green_font_prefix}proxies:${RESET}"
@@ -1207,7 +1191,8 @@ install_shadowtls() {
 
     local ss_method=$(get_ss_method)
     local ss_password=$(get_ss_password)
-    local server_ip=$(get_server_ip) || { print_error "获取服务器 IP 失败"; return 1; }
+    local server_ip=$(get_server_ip_silent) || { print_error "获取服务器 IP 失败"; return 1; }
+    
     clear
     echo -e "${Green_font_prefix}=== ShadowTLS 安装完成，以下为配置信息 ===${RESET}"
     echo -e "${Cyan_font_prefix}Shadow-TLS 配置信息：${RESET}"
@@ -1327,7 +1312,7 @@ view_config() {
     if read_config; then
         local ss_password=$(get_ss_password)
         local ss_method=$(get_ss_method)
-        local server_ip=$(get_server_ip) || { print_error "获取服务器 IP 失败"; return 1; }
+        local server_ip=$(get_server_ip_silent) || { print_error "获取服务器 IP 失败"; return 1; }
         echo -e "${Cyan_font_prefix}Shadow-TLS 配置信息：${RESET}"
         echo -e "本机 IP：${server_ip}"
         echo -e "外部监听端口：${external_listen_port}"
