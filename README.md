@@ -17,7 +17,7 @@ ShadowTLS 管理脚本，支持一键安装、升级和卸载，默认使用v3(s
 **一键部署命令**
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/moonfogs/ShadowTLS-Manager/refs/heads/main/ShadowTLS_Manager.sh)
+bash <(curl -sSL https://raw.githubusercontent.com/moonfogs/ShadowTLS-Manager/refs/heads/main/ShadowTLS_Manager.sh)
 ```
 
 **查看日志**
@@ -40,7 +40,7 @@ rm ShadowTLS_Manager.sh
 1. 执行下方一键代码
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/moonfogs/ShadowTLS-Manager/refs/heads/main/ShadowTLS_Manager.sh)
+bash <(curl -sSL https://raw.githubusercontent.com/moonfogs/ShadowTLS-Manager/refs/heads/main/ShadowTLS_Manager.sh)
 ```
 2. 输入数字 1. 安装 Shadow-TLS
 3. 脚本会自动识别已部署的Shadowsocks节点，若没有安装相关服务，请按回车进入安装ss-rust流程
