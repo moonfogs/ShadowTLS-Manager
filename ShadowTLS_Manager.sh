@@ -36,7 +36,6 @@ TLS_PASSWORD=""
 WILDCARD_SNI="false"
 FASTOPEN="false"
 RELEASE=""
-CPU_FIX_APPLIED="false"
 SERVER_IP_CACHE=""
 
 # 日志文件
@@ -102,47 +101,6 @@ prompt_with_default() {
     local input
     read -rp "${prompt_message} (默认: ${default_value}): " input
     echo "${input:-$default_value}"
-}
-
-# ===========================
-# 防火墙管理
-# ===========================
-
-allow_port() {
-    local port="$1"
-    local protocol="$2"  # tcp 或 udp
-    if command -v ufw >/dev/null 2>&1; then
-        if ufw status | grep -q "$port/$protocol.*ALLOW"; then
-            print_info "端口 $port/$protocol 已在 ufw 放行规则中"
-        else
-            ufw allow "$port"/"$protocol" >/dev/null 2>&1 && print_info "ufw 已放行 $port/$protocol"
-        fi
-    elif command -v firewall-cmd >/dev/null 2>&1; then
-        if firewall-cmd --list-ports | grep -q "$port/$protocol"; then
-            print_info "端口 $port/$protocol 已在 firewalld 放行规则中"
-        else
-            firewall-cmd --add-port="$port"/"$protocol" --permanent >/dev/null 2>&1 && \
-            firewall-cmd --reload >/dev/null 2>&1 && \
-            print_info "firewalld 已放行 $port/$protocol"
-        fi
-    else
-        print_warning "未检测到 ufw 或 firewalld，跳过防火墙配置"
-    fi
-}
-
-# 撤销指定端口和协议的放行规则
-deny_port() {
-    local port="$1"
-    local protocol="$2"  # tcp 或 udp
-    if command -v ufw >/dev/null 2>&1; then
-        ufw delete allow "$port"/"$protocol" >/dev/null 2>&1 && print_info "ufw 已撤销 $port/$protocol 的放行规则"
-    elif command -v firewall-cmd >/dev/null 2>&1; then
-        firewall-cmd --remove-port="$port"/"$protocol" --permanent >/dev/null 2>&1 && \
-        firewall-cmd --reload >/dev/null 2>&1 && \
-        print_info "firewalld 已撤销 $port/$protocol 的放行规则"
-    else
-        print_warning "未检测到 ufw 或 firewalld，跳过防火墙配置"
-    fi
 }
 
 # ===========================
@@ -306,8 +264,8 @@ get_system_architecture() {
     esac
 }
 
-# 修复域名验证函数 - 完全重写避免污染变量
-check_domain_validity() {
+# 强化版 TLS 1.3 验证函数
+check_tls13_support() {
     local domain="$1"
     
     # 如果是默认域名，直接返回成功
@@ -315,47 +273,40 @@ check_domain_validity() {
         return 0
     fi
     
-    # 使用多种方法验证域名，但不输出任何信息
-    local validation_passed=0
+    print_info "正在检查域名 $domain 的 TLS 1.3 支持..."
     
-    # 方法1: 使用 nslookup
-    if command -v nslookup >/dev/null 2>&1; then
-        if nslookup "$domain" >/dev/null 2>&1; then
-            validation_passed=1
+    # 方法1: 使用 openssl s_client 检查 TLS 1.3 握手 
+    if command -v openssl >/dev/null 2>&1; then
+        local tls_check
+        tls_check=$(timeout 10 openssl s_client -connect "$domain:443" -tls1_3 < /dev/null 2>&1)
+        if echo "$tls_check" | grep -q "TLSv1.3"; then
+            print_info "✓ 域名 $domain 支持 TLS 1.3"
+            return 0
+        elif echo "$tls_check" | grep -q "handshake failure"; then
+            print_warning "域名 $domain 不支持 TLS 1.3 握手"
+        else
+            print_warning "无法通过 OpenSSL 确定域名 $domain 的 TLS 1.3 支持状态"
         fi
     fi
     
-    # 方法2: 使用 ping (只检查解析，不实际发送包)
-    if [[ $validation_passed -eq 0 ]] && command -v ping >/dev/null 2>&1; then
-        if ping -c 1 -W 1 "$domain" >/dev/null 2>&1; then
-            validation_passed=1
-        fi
-    fi
-    
-    # 方法3: 使用 curl 检查 HTTP 响应
-    if [[ $validation_passed -eq 0 ]] && command -v curl >/dev/null 2>&1; then
+    # 方法2: 基础 HTTPS 连接检查作为备用
+    if command -v curl >/dev/null 2>&1; then
         if curl --max-time 5 -s -I "https://$domain" >/dev/null 2>&1; then
-            validation_passed=1
-        elif curl --max-time 5 -s -I "http://$domain" >/dev/null 2>&1; then
-            validation_passed=1
+            print_warning "域名 $domain HTTPS 连接正常，但无法确认 TLS 1.3 支持"
+            read -rp "是否继续使用此域名？(y/n, 默认 y): " continue_choice
+            if [[ -z "$continue_choice" || "${continue_choice,,}" == "y" ]]; then
+                return 0
+            else
+                return 1
+            fi
         fi
     fi
     
-    # 方法4: 使用 getent
-    if [[ $validation_passed -eq 0 ]] && command -v getent >/dev/null 2>&1; then
-        if getent hosts "$domain" >/dev/null 2>&1; then
-            validation_passed=1
-        fi
-    fi
-    
-    if [[ $validation_passed -eq 1 ]]; then
-        return 0
-    else
-        return 1
-    fi
+    print_error "域名 $domain TLS 1.3 验证失败"
+    return 1
 }
 
-# 完全重写域名提示函数，避免任何输出污染
+# 修改后的域名提示函数
 prompt_valid_domain() {
     local domain
     while true; do
@@ -367,12 +318,13 @@ prompt_valid_domain() {
             return 0
         fi
         
-        # 静默验证，不输出任何信息
-        if check_domain_validity "$domain"; then
+        # 强化 TLS 1.3 验证
+        if check_tls13_support "$domain"; then
             echo "$domain"
             return 0
         else
-            echo -e "${Red_font_prefix}域名 ${domain} 验证失败，请重新输入${RESET}" >&2
+            echo -e "${Red_font_prefix}域名 ${domain} TLS 1.3 验证失败，请重新输入${RESET}" >&2
+            echo -e "${Yellow_font_prefix}提示：请确保域名支持 TLS 1.3 并且可以通过 HTTPS 访问${RESET}" >&2
         fi
     done
 }
@@ -443,7 +395,6 @@ create_service() {
     SERVICE_FILE="/etc/systemd/system/shadow-tls.service"
     local wildcard_sni_option=""
     local fastopen_option=""
-    local environment_line=""
     local reply
 
     echo -e "${Yellow_font_prefix}是否开启泛域名SNI？(开启后客户端伪装域名无需与服务端一致) (y/n, 默认不开启):${RESET}"
@@ -466,11 +417,6 @@ create_service() {
         FASTOPEN="false"
     fi
 
-    # 检查是否已经应用了 CPU 修复
-    if [[ "$CPU_FIX_APPLIED" == "true" ]]; then
-        environment_line="Environment=MONOIO_FORCE_LEGACY_DRIVER=1"
-    fi
-
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Shadow-TLS Server Service
@@ -483,7 +429,6 @@ Type=simple
 User=root
 Restart=on-failure
 RestartSec=5s
-${environment_line}
 ExecStartPre=/bin/sh -c "ulimit -n 51200"
 ExecStart=/usr/local/bin/shadow-tls $fastopen_option--v3 --strict server $wildcard_sni_option--listen [::]:${EXT_PORT} --server 127.0.0.1:${BACKEND_PORT} --tls ${TLS_DOMAIN}:443 --password ${TLS_PASSWORD}
 
@@ -493,7 +438,7 @@ EOF
     print_info "系统服务已配置完成"
 }
 
-# 完全重写 IP 获取函数，使用推荐的接口并避免日志污染
+# 修改后的 IP 获取函数：优先 IPv4，只有没有 IPv4 时才使用 IPv6
 get_server_ip() {
     # 如果有缓存，直接返回缓存结果
     if [[ -n "$SERVER_IP_CACHE" ]]; then
@@ -502,54 +447,32 @@ get_server_ip() {
     fi
     
     local ipv4=""
-    local temp_ip=""
+    local ipv6=""
     
-    # 使用推荐的 IP 查询接口
-    local ip_services=(
-        "https://iplark.com/ipstack"
-        "https://api.live.bilibili.com/xlive/web-room/v1/index/getIpInfo"
-        "https://api.ipify.org"
-        "https://ipinfo.io/ip"
-    )
-    
-    # 尝试获取 IPv4 地址
-    for service in "${ip_services[@]}"; do
-        if [[ "$service" == "https://iplark.com/ipstack" ]]; then
-            temp_ip=$(curl -s --connect-timeout 5 "$service" | jq -r '.ip' 2>/dev/null)
-        elif [[ "$service" == "https://api.live.bilibili.com/xlive/web-room/v1/index/getIpInfo" ]]; then
-            temp_ip=$(curl -s --connect-timeout 5 "$service" | jq -r '.data.addr' 2>/dev/null)
-        else
-            temp_ip=$(curl -s --connect-timeout 5 "$service" | tr -d '\n')
-        fi
+    # 从网络接口获取
+    if command -v ip >/dev/null 2>&1; then
+        # 优先获取 IPv4 地址
+        ipv4=$(ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -vE '^(127\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.)' | head -n1)
         
-        if [[ -n "$temp_ip" && "$temp_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-            ipv4="$temp_ip"
-            log_message "INFO" "通过 $service 获取到 IPv4: $ipv4"
-            break
-        fi
-        temp_ip=""
-    done
-    
-    # 如果推荐的接口都失败了，尝试备用方法
-    if [[ -z "$ipv4" ]]; then
-        # 从网络接口获取
-        if command -v ip >/dev/null 2>&1; then
-            ipv4=$(ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -vE '^(127\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.)' | head -n1)
-        elif command -v ifconfig >/dev/null 2>&1; then
-            ipv4=$(ifconfig | grep -oP 'inet (addr:)?\K(\d{1,3}\.){3}\d{1,3}' | grep -vE '^(127\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.)' | head -n1)
-        fi
-        if [[ -n "$ipv4" ]]; then
-            log_message "INFO" "从网络接口获取到 IPv4: $ipv4"
+        # 如果没有 IPv4，再获取 IPv6 地址 
+        if [[ -z "$ipv4" ]]; then
+            ipv6=$(ip -6 addr show scope global | grep -oP '(?<=inet6\s)[0-9a-fA-F:]+' | grep -v '^::1$' | head -n1)
         fi
     fi
     
-    # 验证 IP 地址格式
-    if [[ -n "$ipv4" && "$ipv4" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    # 优先使用 IPv4，只有在没有 IPv4 时才使用 IPv6
+    if [[ -n "$ipv4" ]]; then
         SERVER_IP_CACHE="$ipv4"
         echo "$ipv4"
+        print_info "检测到 IPv4 地址: $ipv4"
+        return 0
+    elif [[ -n "$ipv6" ]]; then
+        SERVER_IP_CACHE="$ipv6"
+        echo "$ipv6"
+        print_info "检测到 IPv6 地址: $ipv6"
         return 0
     else
-        log_message "ERROR" "无法获取有效的公网 IP 地址"
+        log_message "ERROR" "无法获取有效的服务器 IP 地址"
         return 1
     fi
 }
@@ -580,9 +503,16 @@ generate_ss_shadowtls_url() {
     local listen_port="$7"
 
     local userinfo=$(urlsafe_base64 "${ss_method}:${ss_password}")
+    
+    # 如果是 IPv6 地址，需要在 URL 中用方括号包裹
+    local display_ip="$server_ip"
+    if [[ "$server_ip" =~ : ]]; then
+        display_ip="[$server_ip]"
+    fi
+    
     local shadow_tls_config="{\"version\":\"3\",\"password\":\"${stls_password}\",\"host\":\"${stls_sni}\",\"port\":\"${listen_port}\",\"address\":\"${server_ip}\"}"
     local shadow_tls_base64=$(urlsafe_base64 "${shadow_tls_config}")
-    echo "ss://${userinfo}@${server_ip}:${backend_port}?shadow-tls=${shadow_tls_base64}#SS-ShadowTLS-${server_ip}"
+    echo "ss://${userinfo}@${display_ip}:${backend_port}?shadow-tls=${shadow_tls_base64}#SS-ShadowTLS-${server_ip}"
 }
 
 write_config() {
@@ -600,7 +530,6 @@ write_config() {
         echo "backend_port=$BACKEND_PORT"
         echo "wildcard_sni=$WILDCARD_SNI"
         echo "fastopen=$FASTOPEN"
-        echo "cpu_fix_applied=$CPU_FIX_APPLIED"
         echo "ss_method=\"$(get_ss_method)\""
         echo "ss_password=\"$(get_ss_password)\""
     } > "$CONFIG_FILE"
@@ -622,7 +551,6 @@ read_config() {
             BACKEND_PORT="${backend_port:-}"
             WILDCARD_SNI="${wildcard_sni:-false}"
             FASTOPEN="${fastopen:-false}"
-            CPU_FIX_APPLIED="${cpu_fix_applied:-false}"
             SERVER_IP_CACHE="${local_ip:-}"
             return 0
         else
@@ -635,7 +563,7 @@ read_config() {
     fi
 }
 
-# 清理的配置生成函数
+# 配置生成函数
 generate_config() {
     local server_ip="$1"
     local listen_port="$2"
@@ -646,8 +574,13 @@ generate_config() {
     local stls_sni="$7"
     local fastopen="$8"
 
+    # 检测 IP 类型
     local ip_type="IPv4"
     local display_ip="$server_ip"
+    if [[ "$server_ip" =~ : ]]; then
+        ip_type="IPv6"
+        display_ip="[$server_ip]"  # IPv6 地址用方括号包裹
+    fi
 
     echo -e "\n${Yellow_font_prefix}================== 服务器配置 ($ip_type) ==================${RESET}"
     echo -e "${Green_font_prefix}服务器 IP：${server_ip}${RESET}"
@@ -660,14 +593,16 @@ generate_config() {
     echo -e "  密码：${stls_password}"
     echo -e "  伪装SNI：${stls_sni}"
     echo -e "  版本：3"
+    echo -e "  泛域名SNI：${WILDCARD_SNI}"
+    echo -e "  Fastopen：${fastopen}"
 
     echo -e "\n${Yellow_font_prefix}------------------ Surge 配置 ($ip_type) ------------------${RESET}"
     echo -e "${Green_font_prefix}SS+sTLS = ss, ${display_ip}, ${listen_port}, encrypt-method=${ss_method}, password=${ss_password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${stls_sni}, shadow-tls-version=3, udp-relay=true, udp-port=${backend_port}${RESET}"
 
     echo -e "\n${Yellow_font_prefix}------------------ Loon 配置 ($ip_type) ------------------${RESET}"
-    echo -e "${Green_font_prefix}SS+sTLS = Shadowsocks, ${display_ip}, ${listen_port}, ${ss_method}, \"${ss_password}\", shadow-tls-password=${stls_password}, shadow-tls-sni=${stls_sni}, shadow-tls-version=3, udp-port=${backend_port}, ip-mode=ipv4-only, fast-open=${fastopen}, udp=true${RESET}"
+    echo -e "${Green_font_prefix}SS+sTLS = Shadowsocks, ${display_ip}, ${listen_port}, ${ss_method}, \"${ss_password}\", shadow-tls-password=${stls_password}, shadow-tls-sni=${stls_sni}, shadow-tls-version=3, udp-port=${backend_port}, fast-open=${fastopen}, udp=true${RESET}"
 
-    local ss_url=$(generate_ss_shadowtls_url "$display_ip" "$ss_method" "$ss_password" "$backend_port" "$stls_password" "$stls_sni" "$listen_port")
+    local ss_url=$(generate_ss_shadowtls_url "$server_ip" "$ss_method" "$ss_password" "$backend_port" "$stls_password" "$stls_sni" "$listen_port")
     echo -e "\n${Yellow_font_prefix}------------------ Shadowrocket 配置 ($ip_type) ------------------${RESET}"
     echo -e "${Green_font_prefix}SS + ShadowTLS 链接：${RESET}${ss_url}"
     echo -e "${Green_font_prefix}二维码链接（复制到浏览器生成）：${RESET}https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=$(echo -n "$ss_url" | jq -s -R -r @uri)"
@@ -676,7 +611,7 @@ generate_config() {
     echo -e "${Green_font_prefix}proxies:${RESET}"
     echo -e "  - name: SS+sTLS"
     echo -e "    type: ss"
-    echo -e "    server: ${display_ip}"
+    echo -e "    server: ${server_ip}"
     echo -e "    port: ${listen_port}"
     echo -e "    cipher: ${ss_method}"
     echo -e "    password: \"${ss_password}\""
@@ -938,8 +873,6 @@ install_ss_rust() {
         sleep 3
         if systemctl is-active --quiet ss-rust; then
             print_info "Shadowsocks-rust 服务运行正常"
-            allow_port "$port" "tcp"
-            allow_port "$port" "udp"
             
             # 验证服务是否真正在监听端口
             if ss -tuln | grep -q ":$port "; then
@@ -1163,7 +1096,6 @@ install_shadowtls() {
     create_service
     print_info "外部监听端口设置完毕，正在下载 Shadow-TLS 并生成系统服务配置，请稍候..."
     download_shadowtls "false" || return 1
-    configure_firewall
     systemctl daemon-reload
     systemctl enable --now shadow-tls
     sleep 2
@@ -1197,11 +1129,6 @@ install_shadowtls() {
         echo -e "\n${Yellow_font_prefix}==================================================${RESET}"
         generate_config "$server_ip" "$EXT_PORT" "$BACKEND_PORT" "$ss_method" "$ss_password" "$TLS_PASSWORD" "$TLS_DOMAIN" "$FASTOPEN"
     fi
-}
-
-configure_firewall() {
-    allow_port "$EXT_PORT" "tcp"      # 放行外部监听端口 TCP
-    allow_port "$BACKEND_PORT" "udp"  # 放行后端服务端口 UDP
 }
 
 check_service_status() {
@@ -1281,12 +1208,6 @@ uninstall_shadowtls() {
     if [[ "${confirm,,}" == "y" ]]; then
         systemctl stop shadow-tls
         systemctl disable shadow-tls
-        if read_config; then
-            deny_port "$EXT_PORT" "tcp"      # 撤销外部监听端口 TCP 放行规则
-            deny_port "$BACKEND_PORT" "udp"  # 撤销后端服务端口 UDP 放行规则
-        else
-            print_warning "无法读取配置文件，跳过防火墙规则撤销"
-        fi
         rm -f /usr/local/bin/shadow-tls /etc/systemd/system/shadow-tls.service "$CONFIG_FILE"
         rm -rf /etc/shadowtls
         systemctl daemon-reload
@@ -1344,11 +1265,7 @@ set_external_port() {
         print_error "端口 ${new_port} 已被占用，请更换端口"
         return 1
     fi
-    if [[ "$old_port" != "未设置" && "$old_port" != "$new_port" ]]; then
-        deny_port "$old_port" "tcp"  # 撤销旧的 TCP 放行规则
-    fi
     EXT_PORT="$new_port"
-    allow_port "$EXT_PORT" "tcp"  # 放行新的 TCP 端口
     write_config || return 1
     update_service_file
     systemctl daemon-reload
@@ -1368,11 +1285,7 @@ set_backend_port() {
             read -rp "是否使用此端口作为 Shadow-TLS 后端服务端口？(y/n, 默认: y): " use_ss_port
             [[ -z "$use_ss_port" ]] && use_ss_port="y"
             if [[ "$use_ss_port" =~ ^[Yy]$ ]]; then
-                if [[ "$old_port" != "未设置" && "$old_port" != "${ports[0]}" ]]; then
-                    deny_port "$old_port" "udp"  # 撤销旧的 UDP 放行规则
-                fi
                 BACKEND_PORT="${ports[0]}"
-                allow_port "$BACKEND_PORT" "udp"  # 放行新的 UDP 端口
                 write_config || return 1
                 update_service_file
                 systemctl daemon-reload
@@ -1389,11 +1302,7 @@ set_backend_port() {
                 read -rp "请选择一个端口 (输入编号，默认: 0): " choice
                 [[ -z "$choice" ]] && choice=0
                 if [[ "$choice" =~ ^[0-9]+$ && "$choice" -ge 0 && "$choice" -lt ${#ports[@]} ]]; then
-                    if [[ "$old_port" != "未设置" && "$old_port" != "${ports[$choice]}" ]]; then
-                        deny_port "$old_port" "udp"  # 撤销旧的 UDP 放行规则
-                    fi
                     BACKEND_PORT="${ports[$choice]}"
-                    allow_port "$BACKEND_PORT" "udp"  # 放行新的 UDP 端口
                     write_config || return 1
                     update_service_file
                     systemctl daemon-reload
@@ -1411,11 +1320,7 @@ set_backend_port() {
         if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; then
             print_error "端口号必须为1-65535之间的整数"
         else
-            if [[ "$old_port" != "未设置" && "$old_port" != "$new_port" ]]; then
-                deny_port "$old_port" "udp"  # 撤销旧的 UDP 放行规则
-            fi
             BACKEND_PORT="$new_port"
-            allow_port "$BACKEND_PORT" "udp"  # 放行新的 UDP 端口
             write_config || return 1
             update_service_file
             systemctl daemon-reload
@@ -1442,11 +1347,8 @@ update_service_file() {
     if [[ -f "$SERVICE_FILE" ]]; then
         local wildcard_sni_option=""
         local fastopen_option=""
-        local environment_line=""
         [[ "$WILDCARD_SNI" == "true" ]] && wildcard_sni_option="--wildcard-sni=authed "
         [[ "$FASTOPEN" == "true" ]] && fastopen_option="--fastopen "
-        # 检查是否应用了 CPU 修复
-        [[ "$CPU_FIX_APPLIED" == "true" ]] && environment_line="Environment=MONOIO_FORCE_LEGACY_DRIVER=1"
         cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Shadow-TLS Server Service
@@ -1459,7 +1361,6 @@ Type=simple
 User=root
 Restart=on-failure
 RestartSec=5s
-${environment_line}
 ExecStartPre=/bin/sh -c "ulimit -n 51200"
 ExecStart=/usr/local/bin/shadow-tls $fastopen_option--v3 --strict server $wildcard_sni_option--listen [::]:${EXT_PORT} --server 127.0.0.1:${BACKEND_PORT} --tls ${TLS_DOMAIN}:443 --password ${TLS_PASSWORD}
 
@@ -1469,43 +1370,6 @@ EOF
         print_info "服务单元配置文件已更新"
     else
         print_error "服务单元配置文件不存在，无法更新"
-    fi
-}
-
-fix_cpu_issue() {
-    local SERVICE_FILE="/etc/systemd/system/shadow-tls.service"
-    if [[ ! -f "$SERVICE_FILE" ]]; then
-        print_error "Shadow-TLS 服务文件 $SERVICE_FILE 不存在，请先安装 Shadow-TLS"
-        return 1
-    fi
-
-    if grep -q "Environment=MONOIO_FORCE_LEGACY_DRIVER=1" "$SERVICE_FILE"; then
-        print_info "环境变量 MONOIO_FORCE_LEGACY_DRIVER=1 已设置，无需重复操作"
-        return 0
-    fi
-
-    if ! sed -i '/\[Service\]/a Environment=MONOIO_FORCE_LEGACY_DRIVER=1' "$SERVICE_FILE"; then
-        print_error "修改服务文件失败"
-        return 1
-    fi
-
-    CPU_FIX_APPLIED="true"
-    if [[ -f "$CONFIG_FILE" ]]; then
-        echo "cpu_fix_applied=true" >> "$CONFIG_FILE"
-    else
-        print_warning "配置文件 $CONFIG_FILE 不存在，跳过记录 CPU 修复状态"
-    fi
-
-    systemctl daemon-reload || { print_error "重载 systemd 配置失败"; return 1; }
-    systemctl restart shadow-tls || { print_error "重启 Shadow-TLS 服务失败"; return 1; }
-
-    sleep 2
-    if systemctl is-active --quiet shadow-tls; then
-        print_info "已成功设置 MONOIO_FORCE_LEGACY_DRIVER=1，Shadow-TLS 服务运行正常"
-    else
-        print_error "Shadow-TLS 服务未正常运行，请检查日志"
-        systemctl status shadow-tls
-        return 1
     fi
 }
 
@@ -1588,10 +1452,6 @@ main_menu() {
         echo -e "=================================="
         echo -e "${Yellow_font_prefix}6. 管理 Shadowsocks-rust${RESET}"
         echo -e "=================================="
-        echo -e " 问题修复"
-        echo -e "=================================="
-        echo -e "${Yellow_font_prefix}9. 修复 Shadow-TLS CPU 100% 问题${RESET}"
-        echo -e "=================================="
         echo -e " 退出"
         echo -e "=================================="
         echo -e "${Yellow_font_prefix}0. 退出${RESET}"
@@ -1617,7 +1477,7 @@ main_menu() {
         fi
         echo -e "----------------------------------"
 
-        read -rp "请选择操作 [0-9]: " choice
+        read -rp "请选择操作 [0-6]: " choice
         case "$choice" in
             1) install_shadowtls ;;
             2) upgrade_shadowtls ;;
@@ -1649,7 +1509,6 @@ main_menu() {
                 fi
                 ;;
             6) ss_rust_menu ;;
-            9) fix_cpu_issue ;;
             0) 
                 print_info "感谢使用，再见！"
                 exit 0 
