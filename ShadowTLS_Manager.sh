@@ -306,7 +306,7 @@ get_system_architecture() {
     esac
 }
 
-# 修复域名验证函数
+# 修复域名验证函数 - 完全重写避免污染变量
 check_domain_validity() {
     local domain="$1"
     
@@ -315,13 +315,12 @@ check_domain_validity() {
         return 0
     fi
     
-    # 使用多种方法验证域名
+    # 使用多种方法验证域名，但不输出任何信息
     local validation_passed=0
     
     # 方法1: 使用 nslookup
     if command -v nslookup >/dev/null 2>&1; then
         if nslookup "$domain" >/dev/null 2>&1; then
-            print_info "域名 $domain 通过 nslookup 验证"
             validation_passed=1
         fi
     fi
@@ -329,7 +328,6 @@ check_domain_validity() {
     # 方法2: 使用 ping (只检查解析，不实际发送包)
     if [[ $validation_passed -eq 0 ]] && command -v ping >/dev/null 2>&1; then
         if ping -c 1 -W 1 "$domain" >/dev/null 2>&1; then
-            print_info "域名 $domain 通过 ping 验证"
             validation_passed=1
         fi
     fi
@@ -337,10 +335,8 @@ check_domain_validity() {
     # 方法3: 使用 curl 检查 HTTP 响应
     if [[ $validation_passed -eq 0 ]] && command -v curl >/dev/null 2>&1; then
         if curl --max-time 5 -s -I "https://$domain" >/dev/null 2>&1; then
-            print_info "域名 $domain 通过 HTTPS 连接验证"
             validation_passed=1
         elif curl --max-time 5 -s -I "http://$domain" >/dev/null 2>&1; then
-            print_info "域名 $domain 通过 HTTP 连接验证"
             validation_passed=1
         fi
     fi
@@ -348,7 +344,6 @@ check_domain_validity() {
     # 方法4: 使用 getent
     if [[ $validation_passed -eq 0 ]] && command -v getent >/dev/null 2>&1; then
         if getent hosts "$domain" >/dev/null 2>&1; then
-            print_info "域名 $domain 通过 getent 验证"
             validation_passed=1
         fi
     fi
@@ -356,30 +351,24 @@ check_domain_validity() {
     if [[ $validation_passed -eq 1 ]]; then
         return 0
     else
-        print_warning "域名 $domain 无法通过常规方法验证，但可能仍然有效"
-        read -rp "是否继续使用此域名？(y/n, 默认 y): " continue_choice
-        if [[ -z "$continue_choice" || "${continue_choice,,}" == "y" ]]; then
-            return 0
-        else
-            return 1
-        fi
+        return 1
     fi
 }
 
+# 完全重写域名提示函数，避免任何输出污染
 prompt_valid_domain() {
     local domain
     while true; do
-        domain=$(prompt_with_default "请输入用于伪装的 TLS 域名（请确保该域名支持 TLS 1.3）" "captive.apple.com")
+        read -rp "请输入用于伪装的 TLS 域名（请确保该域名支持 TLS 1.3） (默认: captive.apple.com): " domain
+        domain="${domain:-captive.apple.com}"
         
         if [[ "$domain" == "captive.apple.com" ]]; then
-            echo -e "${Green_font_prefix}使用默认域名 captive.apple.com${RESET}" >&2
-            echo "$domain"
+            echo "captive.apple.com"
             return 0
         fi
         
-        echo -e "${Cyan_font_prefix}正在验证域名 ${domain} 的有效性，请稍候...${RESET}" >&2
+        # 静默验证，不输出任何信息
         if check_domain_validity "$domain"; then
-            echo -e "${Green_font_prefix}域名 ${domain} 验证通过${RESET}" >&2
             echo "$domain"
             return 0
         else
@@ -513,7 +502,6 @@ get_server_ip() {
     fi
     
     local ipv4=""
-    local ipv6=""
     local temp_ip=""
     
     # 使用推荐的 IP 查询接口
@@ -1332,6 +1320,7 @@ view_config() {
     fi
 }
 
+# 修复 set_disguise_domain 函数
 set_disguise_domain() {
     local new_domain
     new_domain=$(prompt_valid_domain)
