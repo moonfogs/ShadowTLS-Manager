@@ -838,6 +838,28 @@ EOF
     print_info "ss-rust 系统服务已创建"
 }
 
+# 修复 Shadowsocks-rust 配置问题
+fix_ss_rust_config() {
+    local config_file="$1"
+    local port="$2"
+    local password="$3"
+    local method="$4"
+    local tfo="$5"
+    
+    # 修复配置格式问题
+    cat > "$config_file" <<EOF
+{
+    "server": "0.0.0.0",
+    "server_port": $port,
+    "password": "$password",
+    "method": "$method",
+    "fast_open": $tfo,
+    "mode": "tcp_and_udp",
+    "nofile": 65535
+}
+EOF
+}
+
 uninstall_ss_rust() {
     if [[ ! -f "$SS_RUST_FILE" ]]; then
         print_error "Shadowsocks-rust 未安装"
@@ -899,13 +921,14 @@ install_ss_rust() {
     esac
     print_info "选择的加密方式: $method"
 
-    # 设置密码
+    # 设置密码 - 修复密码生成问题
     read -rp "请输入 Shadowsocks-rust 密码 (留空则自动生成): " input_password
     if [[ -z "$input_password" ]]; then
+        # 对于 2022 系列加密方法，使用 base64 编码的密钥
         if [[ "$method" == "2022-blake3-aes-128-gcm" ]]; then
-            password=$(openssl rand -hex 16)
+            password=$(openssl rand -base64 16)
         elif [[ "$method" == "2022-blake3-aes-256-gcm" || "$method" == "2022-blake3-chacha20-poly1305" ]]; then
-            password=$(openssl rand -hex 32)
+            password=$(openssl rand -base64 32)
         else
             password=$(openssl rand -hex 16)
         fi
@@ -922,18 +945,9 @@ install_ss_rust() {
         tfo="false"
     fi
 
-    # 创建配置目录和文件
+    # 创建配置目录和文件 - 使用修复后的配置函数
     mkdir -p "$SS_RUST_FOLDER"
-    cat > "$SS_RUST_CONF" <<EOF
-{
-    "server": "::",
-    "server_port": ${port},
-    "password": "${password}",
-    "method": "${method}",
-    "fast_open": ${tfo},
-    "mode": "tcp_and_udp"
-}
-EOF
+    fix_ss_rust_config "$SS_RUST_CONF" "$port" "$password" "$method" "$tfo"
     print_info "配置文件已写入: $SS_RUST_CONF"
     
     # 下载、安装和创建服务
@@ -945,15 +959,38 @@ EOF
     # 启动服务
     print_info "正在启动 Shadowsocks-rust 服务..."
     systemctl daemon-reload
-    systemctl enable --now ss-rust
-    sleep 2
-    if systemctl is-active --quiet ss-rust; then
-        print_info "Shadowsocks-rust 服务运行正常"
-        allow_port "$port" "tcp"
-        allow_port "$port" "udp"
+    systemctl enable ss-rust
+    
+    # 检查服务状态
+    if systemctl start ss-rust; then
+        sleep 3
+        if systemctl is-active --quiet ss-rust; then
+            print_info "Shadowsocks-rust 服务运行正常"
+            allow_port "$port" "tcp"
+            allow_port "$port" "udp"
+            
+            # 验证服务是否真正在监听端口
+            if ss -tuln | grep -q ":$port "; then
+                print_info "端口 $port 监听正常"
+            else
+                print_warning "端口 $port 未检测到监听，但服务状态正常"
+            fi
+        else
+            print_error "Shadowsocks-rust 服务启动失败"
+            local service_status=$(systemctl status ss-rust --no-pager -l)
+            print_error "服务状态信息: $service_status"
+            
+            # 尝试直接运行来查看错误
+            print_info "尝试直接运行 ssserver 来诊断问题..."
+            if timeout 5s "$SS_RUST_FILE" -c "$SS_RUST_CONF"; then
+                print_info "直接运行成功，可能是 systemd 配置问题"
+            else
+                print_error "直接运行也失败，请检查配置"
+            fi
+            return 1
+        fi
     else
-        print_error "Shadowsocks-rust 服务未正常运行，请检查日志"
-        systemctl status ss-rust
+        print_error "Shadowsocks-rust 服务启动命令失败"
         return 1
     fi
 }
@@ -1070,7 +1107,12 @@ install_shadowtls() {
         print_warning "未在本机检测到已配置的 Shadowsocks (ss-rust, xray, sing-box)"
         read -rp "是否需要现在为您安装并配置 Shadowsocks-rust? (y/n, 默认 y): " install_ss_now
         if [[ -z "$install_ss_now" || "${install_ss_now,,}" == "y" ]]; then
-            install_ss_rust || { print_error "Shadowsocks-rust 安装失败，无法继续安装 Shadow-TLS"; return 1; }
+            if install_ss_rust; then
+                print_info "Shadowsocks-rust 安装成功"
+            else
+                print_error "Shadowsocks-rust 安装失败，无法继续安装 Shadow-TLS"
+                return 1
+            fi
         else
             while true; do
                 read -rp "请输入后端服务端口 (适用于 SS2022、Trojan、Snell 等，端口范围为1-65535): " BACKEND_PORT
