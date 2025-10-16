@@ -464,12 +464,10 @@ get_server_ip() {
     if [[ -n "$ipv4" ]]; then
         SERVER_IP_CACHE="$ipv4"
         echo "$ipv4"
-        print_info "检测到 IPv4 地址: $ipv4"
         return 0
     elif [[ -n "$ipv6" ]]; then
         SERVER_IP_CACHE="$ipv6"
         echo "$ipv6"
-        print_info "检测到 IPv6 地址: $ipv6"
         return 0
     else
         log_message "ERROR" "无法获取有效的服务器 IP 地址"
@@ -484,9 +482,22 @@ get_server_ip_silent() {
         return 0
     fi
     
-    # 强制重新获取并缓存
+    # 强制重新获取并缓存，不输出任何信息
     SERVER_IP_CACHE=$(get_server_ip 2>/dev/null)
     echo "$SERVER_IP_CACHE"
+}
+
+# 带信息输出的 IP 获取函数
+get_server_ip_with_info() {
+    local ip=$(get_server_ip)
+    if [[ -n "$ip" ]]; then
+        if [[ "$ip" =~ : ]]; then
+            print_info "检测到 IPv6 地址: $ip"
+        else
+            print_info "检测到 IPv4 地址: $ip"
+        fi
+    fi
+    echo "$ip"
 }
 
 urlsafe_base64() {
@@ -517,7 +528,7 @@ generate_ss_shadowtls_url() {
 
 write_config() {
     mkdir -p /etc/shadowtls
-    local server_ip=$(get_server_ip) || { print_error "无法获取服务器IP"; return 1; }
+    local server_ip=$(get_server_ip_with_info) || { print_error "无法获取服务器IP"; return 1; }
     
     # 安全地写入配置文件
     {
