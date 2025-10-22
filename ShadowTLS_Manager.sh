@@ -789,14 +789,23 @@ create_ss_rust_config() {
     
     cat > "$config_file" <<EOF
 {
-    "server": "0.0.0.0",
+    "server": "::",
     "server_port": $port,
     "password": "$password",
     "method": "$method",
     "fast_open": $tfo,
     "mode": "tcp_and_udp",
     "no_delay": true,
-    "nofile": 65535
+    "nofile": 65535,
+    "timeout": 300,
+    "udp_timeout": 300,
+    "udp_max_associations": 512,
+    "keep_alive": 15,
+    "dns": "system",
+    "runtime": {
+        "mode": "multi_thread",
+        "worker_count": 4
+    }
 }
 EOF
 }
